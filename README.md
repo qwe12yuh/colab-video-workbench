@@ -35,7 +35,9 @@ bash workbench/colab.sh usage
 
 在工作台点「快速生成」，上传参考图、填写要求，确认授权消耗计算单元后提交。也可以运行 `bash run-colab.sh examples/gpu-smoke/project.json s01` 生成示例镜头。
 
-渲染使用 MiniMax H3 Ref2VA 和 Pika H3 Flex，需要可分配的 96 GB 级 G4 GPU。新运行时需准备环境并下载约 135 GiB 权重。计费从你授权的 Colab 账号扣除，模型网关有独立的订阅或 API 计费。准备剪辑和导出时可以用本机已有素材。 [Colab CLI](https://github.com/googlecolab/google-colab-cli) · [Pika H3 Flex](https://github.com/Pika-Labs/Pika-H3-Flex)
+渲染使用 MiniMax H3 Ref2VA 和 Pika H3 Flex，6 秒镜头显存峰值约 74 GiB，可用 G4（96 GB）、H100 80GB 或 A100 80GB。
+
+**显卡策略**：在工作台「显卡策略」里勾选并排序候选卡，设置轮数和间隔。每次分配后用 `nvidia-smi` 核验显存，不达标（例如 A100 分到 40GB）立即释放并抢下一张。命令行用 `VIDEO_COLAB_GPUS=G4,H100,A100 bash run-colab.sh ...`，MCP 的 `submit_task` 用 `gpus` 参数。80GB 卡上单镜建议不超过 7 秒。新运行时需准备环境并下载约 135 GiB 权重。计费从你授权的 Colab 账号扣除，模型网关有独立的订阅或 API 计费。准备剪辑和导出时可以用本机已有素材。 [Colab CLI](https://github.com/googlecolab/google-colab-cli) · [Pika H3 Flex](https://github.com/Pika-Labs/Pika-H3-Flex)
 
 ## 验证
 
@@ -43,6 +45,7 @@ bash workbench/colab.sh usage
 
 ```bash
 python3 tests/smoke.py
+python3 tests/gpu_acquire.py
 python3 tests/workbench_smoke.py
 bash tests/colab-lifecycle.sh
 uv run --python 3.12 --with mcp==1.27.0 python tests/workbench_mcp.py

@@ -20,6 +20,8 @@ from uuid import uuid4
 
 import jobs
 import gateway
+import gpu
+import director
 from jobs import STATE, ROOT, HERE
 from studio import Project, approved, atomic, digest, export_key, load_json, probe, save_json
 
@@ -300,6 +302,13 @@ class Handler(BaseHTTPRequestHandler):
                                            for row in jobs.list_jobs()[:35]])
             if path == "/api/gateway":
                 return self.json(200, gateway.settings())
+            if path == "/api/voice":
+                import voice
+                return self.json(200, dict(voice.catalog(), gpus=[dict(spec, id=key) for key, spec in gpu.TTS_GPUS.items()],
+                                           plan=gpu.TTS_PLAN))
+            if path == "/api/gpus":
+                return self.json(200, {"gpus": [dict(spec, id=key) for key, spec in gpu.GPUS.items()],
+                                       "default": gpu.DEFAULT_PLAN})
             if path == "/api/usage":
                 return self.json(200, jobs.usage())
             if len(parts) == 4 and parts[1:3] == ["api", "project"]:
@@ -327,6 +336,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, gateway.save(data))
             if path == "/api/gateway/polish":
                 return self.json(200, gateway.polish(data))
+            if path == "/api/voice/save":
+                import voice
+                return self.json(200, voice.save(data))
+            if path == "/api/director/storyboard":
+                return self.json(200, director.storyboard(data))
+            if path == "/api/director/rewrite":
+                return self.json(200, director.rewrite(data))
+            if path == "/api/assistant":
+                return self.json(200, director.assistant(data))
             if path == "/api/quick":
                 return self.json(201, new_reference_project(data))
             if path == "/api/new":

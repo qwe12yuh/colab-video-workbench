@@ -75,9 +75,12 @@ def save_storyboard(project_id: str, revision: str, manifest: dict) -> dict:
 @mcp.tool()
 def submit_task(project_id: str, action: Literal["generate", "qa", "approve", "cut"],
                 shots: list[str] | None = None, gpu_authorized: bool = False,
-                reviewed: bool = False) -> dict:
+                reviewed: bool = False,
+                gpus: list[Literal["G4", "H100", "A100"]] | None = None) -> dict:
     """Queue a task. Set gpu_authorized=true only after the user requests a Colab render.
     Set reviewed=true only for takes the user has confirmed. A cut requires approved takes.
+    For generate, gpus is the allocation priority (default ["G4"]). Every card is checked with
+    nvidia-smi; an A100 that is not the 80 GB model is released and the next attempt starts.
     """
     if action == "generate" and not gpu_authorized:
         raise ValueError("Colab generation requires the user's authorization to spend compute units.")
@@ -85,7 +88,10 @@ def submit_task(project_id: str, action: Literal["generate", "qa", "approve", "c
         raise ValueError("Confirm human review before approving a take.")
     if action != "cut" and not shots:
         raise ValueError("Provide the explicit shot IDs for this task.")
-    return request("/api/run", {"project": identifier(project_id), "action": action, "shots": shots or []})
+    body = {"project": identifier(project_id), "action": action, "shots": shots or []}
+    if action == "generate" and gpus:
+        body["gpu"] = {"gpus": gpus}
+    return request("/api/run", body)
 
 
 @mcp.tool(annotations=READ)

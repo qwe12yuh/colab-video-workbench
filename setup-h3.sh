@@ -25,8 +25,8 @@ import sys
 import torch
 if sys.version_info[:2] != (3, 12):
     raise SystemExit("Use the Python 3.12 Colab image.")
-if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).total_memory < 90 * 2**30:
-    raise SystemExit("This workflow needs a 96 GB class GPU.")
+if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).total_memory < 76 * 2**30:
+    raise SystemExit("This workflow needs an 80 GB or 96 GB class GPU.")
 print(torch.__version__, torch.cuda.get_device_name(), flush=True)
 PY
 command -v uv >/dev/null

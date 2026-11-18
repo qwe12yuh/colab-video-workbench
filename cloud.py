@@ -22,6 +22,7 @@ tar -xf "$2"
 mkdir -p work "$3"
 ln -s "$3" work/takes
 shift 3
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 bash setup-h3.sh /content/video-h3
 status=0
 /content/video-h3/venv/bin/python -u render_h3.py project.json "$@" --runtime /content/video-h3 || status=$?
