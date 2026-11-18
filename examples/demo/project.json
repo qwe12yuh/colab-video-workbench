@@ -1,0 +1,40 @@
+{
+  "aspect": "portrait",
+  "characters": {
+    "subject": {
+      "label": "示例角色",
+      "description": "由几何图形组成的浅蓝色示例角色",
+      "image": "assets/reference.png"
+    }
+  },
+  "locations": {
+    "studio": "深蓝色背景和柔和灯光。"
+  },
+  "title": "合成素材 · 审片与导出演示",
+  "target_seconds": 18,
+  "style": "几何图形和纯色背景。",
+  "shots": [
+    {
+      "id": "s01",
+      "title": "几何图案",
+      "seconds": 8,
+      "location": "studio",
+      "cast": [
+        "subject"
+      ],
+      "action": "观察画面中的色块和运动。",
+      "source": "assets/01.mp4"
+    },
+    {
+      "id": "s02",
+      "title": "室内灯光",
+      "seconds": 10,
+      "location": "studio",
+      "cast": [
+        "subject"
+      ],
+      "action": "观察第二段合成画面的颜色变化。",
+      "source": "assets/02.mp4"
+    }
+  ]
+}

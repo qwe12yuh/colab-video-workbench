@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Colab 影像工作台</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="layout">
+<aside class="rail">
+  <div class="brand"><span class="mark" aria-hidden="true">▶</span><div><strong>Colab 影像</strong><small>视频工作台</small></div></div>
+  <button id="quick" class="primary quick-entry">＋ 快速生成</button>
+  <div class="nav-head"><span>影片项目</span><button id="new" class="icon" title="新建项目" aria-label="新建项目">＋</button></div>
+  <nav id="projects" aria-label="影片项目"></nav>
+  <div class="rail-bottom"><button id="gateway" class="text-button">模型网关</button><button id="agent" class="text-button">复制给 Agent</button><button id="setup" class="text-button">Colab 连接设置</button></div>
+</aside>
+<div class="main">
+  <header class="top">
+    <div class="top-main"><h1 id="title">Colab 影像工作台</h1><div id="mode" class="muted"></div></div>
+    <div class="cloud">
+      <span id="cloud-status" class="badge">检查连接中</span>
+      <span class="units"><strong id="balance">—</strong><small>计算单元</small></span>
+      <button id="refresh" class="quiet" aria-label="刷新 Colab" title="刷新 Colab">↻</button>
+    </div>
+  </header>
+  <p id="notice" class="notice" role="status" hidden></p>
+  <main class="panels" id="workspace" hidden>
+    <section class="content" aria-label="视频工作区">
+      <section class="card timeline" aria-labelledby="timeline-title">
+        <div class="section-head"><h2 id="timeline-title">分镜</h2><div class="group"><button id="batch" class="quiet" hidden></button><button id="add-shot" class="quiet">＋ 添加镜头</button></div></div>
+        <div id="shots" class="strip"></div>
+      </section>
+      <section class="card preview" aria-labelledby="preview-title">
+        <div class="section-head preview-header">
+          <div class="group"><h2 id="preview-title">预览</h2><span id="preview-status" class="badge"></span></div>
+          <div class="group"><button id="play-trim" class="quiet" hidden>播放成片取段</button><button id="show-shot" class="quiet" hidden>返回镜头</button></div>
+        </div>
+        <div id="stage" class="stage"></div>
+        <p id="preview-note" class="preview-note" hidden></p>
+      </section>
+      <section id="composer" class="card composer" aria-label="镜头设置">
+        <div id="editor"></div>
+        <div id="editor-actions" class="editor-actions"></div>
+      </section>
+    </section>
+    <aside class="activity" aria-label="导出和任务">
+      <section class="card delivery">
+        <div class="section-head"><h2>本集成片</h2><span id="approved-count" class="badge"></span></div>
+        <div id="export-progress" class="segment-progress"></div>
+        <p id="export-hint" class="hint"></p>
+        <button id="export" class="primary full">导出成片</button>
+        <div id="exports"></div>
+      </section>
+      <section class="card task-panel">
+        <div class="section-head"><h2>任务</h2><span id="count" class="badge">空闲</span></div>
+        <div id="active-job"></div>
+        <details class="task-history" id="task-history"><summary>任务记录 <span id="history-count" class="muted"></span></summary><div id="jobs"></div></details>
+        <div id="job-detail"></div>
+      </section>
+    </aside>
+  </main>
+  <section id="welcome" class="card empty-workspace" hidden><h2>从一个影片项目开始</h2><button id="welcome-new" class="primary">上传参考图</button></section>
+</div>
+</div>
+<dialog id="new-dialog">
+<form id="new-form"><h2>新建影片项目</h2>
+<label>项目名<input required maxlength="100" name="title" placeholder="例如：雨夜之后"></label>
+<p>从一个可编辑的参考镜头开始。</p>
+<div class="dialog-actions"><button type="button" data-close="new-dialog" class="quiet">取消</button><button class="primary">创建项目</button></div></form>
+</dialog>
+<dialog id="setup-dialog">
+<div class="dialog-content"><h2>连接 Google Colab</h2>
+<p id="setup-info">点击「刷新 Colab」检查授权和余额。没有授权时可运行首次设置。</p>
+<ol class="setup-steps"><li>在 Ubuntu 24.04 WSL 中安装 Python、uv 和 Google Cloud CLI。</li><li>按终端提示在 Google 页面授权。</li><li>回到工作台刷新连接。生成任务结束后会释放工作台申请的 GPU。</li></ol>
+<pre>bash workbench/bootstrap.sh auth</pre>
+<div class="dialog-actions"><button id="install" class="quiet">安装依赖</button><button id="auth" class="primary">在终端授权</button><button data-close="setup-dialog" class="quiet">关闭</button></div></div>
+</dialog>
+<dialog id="agent-dialog">
+<div class="dialog-content"><h2>连接自己的 Agent</h2>
+<p>Agent 沿用自己的登录、订阅或模型。通过本机 MCP 读写分镜、查看素材、提交任务。</p>
+<textarea id="agent-config" rows="11" readonly aria-label="发给 Agent 的指令"></textarea>
+<div class="dialog-actions"><button id="copy-agent" class="primary">复制给 Agent</button><button data-close="agent-dialog" class="quiet">关闭</button></div></div>
+</dialog>
+<dialog id="quick-dialog">
+<form id="quick-form">
+  <h2>参考图生成视频</h2>
+  <label id="quick-file-label" class="drop-file"><img id="quick-thumb" alt="参考图预览" hidden><span>上传参考图</span><small>PNG 或 JPEG，最大 17.5 MB</small><input type="file" name="image" accept="image/png,image/jpeg" required></label>
+  <label>中文要求<textarea name="prompt" rows="4" required maxlength="1800" placeholder="例如：让图中的人望向窗外，轻轻微笑，镜头慢慢推进。"></textarea></label>
+  <div class="quick-options">
+    <label class="field">画幅<select name="aspect"><option value="portrait">9:16 竖屏</option><option value="landscape">16:9 横屏</option></select></label>
+    <label class="field">时长（秒）<input type="number" name="seconds" min="3" max="12" value="6" required></label>
+    <button id="polish" class="quiet" type="button">用已连接模型润色</button>
+  </div>
+  <p id="quick-hint" class="hint">生成会使用 Colab 算力。完成后自动回传，释放 GPU。</p>
+  <div class="dialog-actions"><button type="button" data-close="quick-dialog" class="quiet">取消</button><button name="intent" value="draft" class="quiet">保存草稿</button><button id="quick-render" name="intent" value="generate" class="primary">生成视频</button></div>
+</form>
+</dialog>
+<dialog id="actor-dialog">
+<form id="actor-form">
+  <h2>导入角色</h2>
+  <label>角色名<input name="label" maxlength="40" required placeholder="例如：林晚"></label>
+  <label>角色参考图<input type="file" name="image" accept="image/png,image/jpeg" required></label>
+  <label>外观说明（可选）<textarea name="description" rows="2" maxlength="240" placeholder="例如：黑色长发、米色风衣"></textarea></label>
+  <label>音色样本（可选，2–15 秒）<input type="file" name="voice" accept="audio/wav,audio/mpeg"></label>
+  <p class="hint">角色加入当前项目，可在多个镜头里重复选择。音色适用于分镜中的指定对白。</p><p id="actor-status" class="hint job-error" role="status"></p>
+  <div class="dialog-actions"><button type="button" data-close="actor-dialog" class="quiet">取消</button><button class="primary">导入角色</button></div>
+</form>
+</dialog>
+<dialog id="gateway-dialog">
+<form id="gateway-form">
+  <h2>模型网关</h2>
+  <label>已保存的连接<select id="gateway-profile"><option value="">＋ 新建连接</option></select></label>
+  <label>连接方式<select id="gateway-kind"><option value="codex">复用本机 Codex 登录</option><option value="api">直接连接兼容 API</option></select></label>
+  <label>连接名称<input id="gateway-name" maxlength="50" placeholder="例如：本机 Codex"></label>
+  <div id="gateway-api-fields">
+    <label class="field">API 地址<input id="gateway-url" type="url" placeholder="https://服务地址/v1"></label>
+    <label class="field">API 密钥<input id="gateway-key" type="password" autocomplete="off" placeholder="服务不需要密钥时可留空"></label>
+    <label class="muted"><input id="gateway-clear-key" type="checkbox"> 清除该连接已保存的密钥</label>
+  </div>
+  <label>模型 ID<input id="gateway-model" list="gateway-model-list" maxlength="180" placeholder="留空使用 Codex 默认模型"></label>
+  <datalist id="gateway-model-list"></datalist>
+  <div class="group"><button id="gateway-check" type="button" class="quiet">检查连接</button><button id="gateway-login" type="button" class="quiet">首次官方登录</button></div>
+  <p id="gateway-status" class="hint" role="status"></p>
+  <div class="dialog-actions"><button data-close="gateway-dialog" type="button" class="quiet">关闭</button><button id="gateway-save" class="primary">保存并使用</button></div>
+</form>
+</dialog>
+</body>
+</html>

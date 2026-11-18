@@ -1,0 +1,29 @@
+{
+  "aspect": "portrait",
+  "characters": {
+    "subject": {
+      "label": "示例角色",
+      "description": "由几何图形组成的浅蓝色示例角色",
+      "image": "assets/reference.png"
+    }
+  },
+  "locations": {
+    "studio": "深蓝色背景和柔和灯光。"
+  },
+  "title": "参考图生成示例",
+  "target_seconds": 6,
+  "style": "简洁的几何动画，竖屏。",
+  "shots": [
+    {
+      "id": "s01",
+      "title": "抬头",
+      "seconds": 6,
+      "location": "studio",
+      "cast": [
+        "subject"
+      ],
+      "action": "<Subject 1> 缓缓抬头看向镜头，镜头轻轻向前推进。",
+      "seed": 41031
+    }
+  ]
+}
