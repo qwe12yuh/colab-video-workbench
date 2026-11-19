@@ -70,10 +70,6 @@ with ThreadingHTTPServer(("127.0.0.1", 0), API) as server:
     assert second["title"] == "镜头 2" and set(plan["locations"]) == {"lobby-night"}
     result = director.rewrite({"action": "她走进来", "preset": "cinematic", "cast": ["林晚：黑色长发"]})
     assert "推近" in result["action"] and result["model"] == "fake/model" and "分镜编辑" in replies[-1]
-    answer = director.assistant({"messages": [{"role": "user", "content": "我想做个雨夜重逢的短片"}],
-                                 "state": {"project": {"title": "测试"}}})
-    assert answer["reply"].startswith("可以") and [row["type"] for row in answer["actions"]] == ["director", "generate"]
-    assert answer["actions"][0]["args"] == {"idea": "雨夜重逢", "shots": 4} and answer["actions"][1]["args"] == {}
     for bad in ({"idea": ""}, {"idea": "x", "shots": 9, "characters": chars}, {"idea": "x", "characters": []}):
         try:
             director.storyboard(bad)
@@ -81,4 +77,4 @@ with ThreadingHTTPServer(("127.0.0.1", 0), API) as server:
             continue
         raise AssertionError(bad)
     server.shutdown()
-print("Director PASS: storyboard sanitizing (cast, seconds, locations, dialogue cues), fenced JSON, rewrite, assistant actions.")
+print("Director PASS: storyboard sanitizing (cast, seconds, locations, dialogue cues), fenced JSON, rewrite.")

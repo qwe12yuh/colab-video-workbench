@@ -199,14 +199,6 @@ ACTIONS = {
     "open_gateway": "打开模型网关设置",
     "open_setup": "打开 Colab 连接设置",
 }
-ASSIST_SYSTEM = (
-    "你是「Colab 影像工作台」里的助手，帮用户把想法做成视频，并引导他们使用工作台。工作台流程：参考图/角色 → 分镜"
-    "（每镜 3–12 秒，最多 3 个角色，可写带时间的对白）→ 在 Colab 抢 G4/H100/A100 80G 渲染 MiniMax H3（画面和声音一起出）"
-    "→ 审片确认 → 导出 MP4+SRT。角色可设参考音色（上传录音或在 Colab 小卡上用 Qwen3-TTS 合成），H3 会用该音色念对白。"
-    "用简洁的中文回答，先回答问题或解释原因，再给 0–3 个可执行操作；只能使用给出的操作类型，镜头和角色只用状态里存在的 ID。"
-    "生成会消耗算力，只在用户明确想生成时才建议 generate，并在 label 里写明。不要编造不存在的功能。可用操作："
-    + "；".join(f"{key}：{value}" for key, value in ACTIONS.items())
-)
 ASSIST_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["reply", "actions"],
     "properties": {
@@ -218,34 +210,3 @@ ASSIST_SCHEMA = {
     },
 }
 
-
-def assistant(data):
-    messages = data.get("messages")
-    if not isinstance(messages, list) or not messages or len(messages) > 24:
-        raise ValueError("请输入问题。")
-    turns = []
-    for row in messages[-12:]:
-        if not isinstance(row, dict) or row.get("role") not in {"user", "assistant"}:
-            raise ValueError("对话格式不正确。")
-        turns.append(("用户" if row["role"] == "user" else "助手") + "：" + clip(row.get("content"), 1200))
-    if not messages[-1].get("role") == "user" or not clip(messages[-1].get("content"), 1200):
-        raise ValueError("请输入问题。")
-    state = data.get("state") if isinstance(data.get("state"), dict) else {}
-    snapshot = json.dumps(state, ensure_ascii=False)[:7000]
-    raw, model = gateway.ask_json(ASSIST_SYSTEM, "工作台当前状态：" + snapshot + "\n\n对话：\n" + "\n".join(turns),
-                                  ASSIST_SCHEMA, max_tokens=1500, timeout=120)
-    reply = raw.get("reply", "").strip()[:2000] if isinstance(raw.get("reply"), str) else ""
-    actions = []
-    for row in raw.get("actions") or []:
-        if not isinstance(row, dict) or row.get("type") not in ACTIONS or len(actions) >= 3:
-            continue
-        args = row.get("args_json") or "{}"
-        try:
-            args = json.loads(args) if isinstance(args, str) else args
-        except json.JSONDecodeError:
-            args = {}
-        actions.append({"type": row["type"], "label": clip(row.get("label"), 40) or row["type"],
-                        "args": args if isinstance(args, dict) else {}})
-    if not reply and not actions:
-        raise ValueError("模型没有给出回答，请换个说法再试。")
-    return {"reply": reply, "actions": actions, "model": model}

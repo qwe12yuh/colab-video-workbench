@@ -23,6 +23,19 @@ const cancelling = new Set();
 let gpuOptions = fallbackGpus, gpuPlan = loadGpuPlan(), noticeTimer = 0;
 let directorPlan = null, aiBusy = "", lastRewrite = null, voiceRefresh = false;
 let colabState = "", assistantMessages = [], assistantBusy = false, nextActions = [];
+let agentTranscript = [], agentSession = "";
+const traceLabels = {workbench_status:"任务状态",read_job:"任务日志",read_project:"项目分镜",colab_usage:"Colab 余额",doctor:"环境自检"};
+function pendingText(pending) {
+  const args = pending.args || {}, parts = [];
+  if (args.job_id) {
+    const row = jobs.find(item => item.id === args.job_id);
+    parts.push(row ? labels[row.action] + " · " + projectTitle(row.project) : "任务 " + String(args.job_id).slice(0,8));
+  }
+  if (Array.isArray(args.gpus) && args.gpus.length) parts.push("显卡 " + args.gpus.map(gpuName).join(" → "));
+  if (Number.isInteger(args.rounds)) parts.push(args.rounds + " 轮");
+  if (pending.name === "retry_job") parts.push("生成或合成会消耗 Colab 算力");
+  return parts.join(" · ");
+}
 const rewritePresets = [["cinematic","更有电影感"],["emotion","强化情绪"],["camera","补全运镜"],
   ["concise","精简要点"],["continuity","衔接前后"],["custom","自定义…"]];
 
@@ -1198,9 +1211,15 @@ function renderAssistant() {
   $("assistant-send").disabled = !model || assistantBusy;
   $("assistant-form").elements.q.placeholder = model ? "说说你想做什么，例如：帮我做一个 20 秒的雨夜重逢短片" : "连接模型网关后可以直接对话";
   replaceMarkup($("assistant-suggest"), model && !assistantMessages.length ? ["帮我把这个项目扩展成 4 个镜头","这个镜头怎么改更有电影感？",
-    "上次任务为什么失败了？","下一步该做什么？"].map(text => '<button type="button" class="quiet" data-assist-ask="' + esc(text) + '">' + esc(text) + '</button>').join("") : "");
+    "上次任务为什么失败了？","帮我检查一下环境"].map(text => '<button type="button" class="quiet" data-assist-ask="' + esc(text) + '">' + esc(text) + '</button>').join("") : "");
   replaceMarkup($("assistant-chat"), assistantMessages.map((message,index) => '<div class="msg ' + (message.role === "user" ? "user" : "bot")
-    + (message.error ? " error" : "") + '">' + (message.thinking ? '<span class="thinking">思考中…</span>' : esc(message.content))
+    + (message.error ? " error" : "") + '">' + (message.trace?.length ? '<span class="trace">查看了：'
+      + esc([...new Set(message.trace)].map(name => traceLabels[name] || name).join("、")) + '</span>' : '')
+    + (message.thinking ? '<span class="thinking">正在查看状态和日志…</span>' : esc(message.content))
+    + (message.pending ? '<div class="approval"><b>需要你批准：' + esc(message.pending.title) + '</b><small>' + esc(pendingText(message.pending))
+      + '</small>' + (message.decided ? '<span class="muted">' + esc(message.decided) + '</span>'
+      : '<div class="group"><button type="button" class="primary small" data-assist-approve="' + index + ':1">批准</button>'
+      + '<button type="button" class="quiet small" data-assist-approve="' + index + ':0">拒绝</button></div>') + '</div>' : '')
     + (message.actions?.length ? '<div class="group">' + message.actions.map((action,j) => '<button type="button" class="'
       + (["generate","export"].includes(action.type) ? "primary" : "quiet") + ' small" data-assist="' + index + ':' + j + '">'
       + esc(action.label) + '</button>').join("") + '</div>' : '') + '</div>').join(""));
@@ -1211,17 +1230,21 @@ function toggleAssistant(open) {
   try {localStorage.setItem("assistant",open ? "1" : "");} catch (_) {}
   if (open) {renderAssistant();if (!$("assistant-form").elements.q.disabled) $("assistant-form").elements.q.focus();}
 }
-async function askAssistant(text) {
-  if (assistantBusy || !text.trim()) return;
+async function askAssistant(text, decision) {
+  if (assistantBusy || (!decision && !text.trim())) return;
   assistantBusy = true;
-  assistantMessages.push({role:"user",content:text.trim()},{role:"assistant",thinking:true});
+  if (!decision) assistantMessages.push({role:"user",content:text.trim()});
+  assistantMessages.push({role:"assistant",thinking:true});
   renderAssistant();
   const scroll = () => {$("assistant-body").scrollTop = $("assistant-body").scrollHeight;};
   scroll();
   try {
-    const history = assistantMessages.filter(row => !row.thinking && !row.error).slice(-12).map(row => ({role:row.role,content:row.content}));
-    const result = await request("/api/assistant",{messages:history,state:assistantState()});
-    assistantMessages[assistantMessages.length-1] = {role:"assistant",content:result.reply,actions:result.actions};
+    const result = await request("/api/assistant",{session:agentSession || undefined,transcript:agentTranscript.slice(-40),
+      state:assistantState(),...(decision ? {decision} : {message:text.trim()})});
+    agentSession = result.session;agentTranscript = result.transcript;
+    assistantMessages[assistantMessages.length-1] = {role:"assistant",content:result.reply,actions:result.actions,
+      trace:result.trace,pending:result.pending};
+    if (decision || result.trace?.length) void syncJobs().catch(() => {});
   } catch (error) {
     assistantMessages[assistantMessages.length-1] = {role:"assistant",content:error.message,error:true};
   } finally {
@@ -1318,6 +1341,17 @@ async function runAssistant(action) {
 $("assistant-toggle").onclick = () => toggleAssistant($("assistant").hidden);
 $("assistant-close").onclick = () => toggleAssistant(false);
 $("assistant").addEventListener("click",handle(async event => {
+  const approve = event.target.closest("[data-assist-approve]");
+  if (approve) {
+    const [index,allow] = approve.dataset.assistApprove.split(":"), message = assistantMessages[Number(index)];
+    if (!message?.pending || message.decided || assistantBusy) return;
+    message.decided = allow === "1" ? "已批准，正在执行…" : "已拒绝";
+    renderAssistant();
+    await askAssistant("",{...message.pending,allow:allow === "1"});
+    message.decided = allow === "1" ? "已批准" : "已拒绝";
+    renderAssistant();
+    return;
+  }
   const ask = event.target.closest("[data-assist-ask]");
   if (ask) {await askAssistant(ask.dataset.assistAsk);return;}
   const target = event.target.closest("[data-assist]");

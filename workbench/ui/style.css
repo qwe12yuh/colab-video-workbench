@@ -393,3 +393,7 @@ dialog form>label{margin:10px 0}
   body.assistant-open .content{grid-template-columns:minmax(0,1fr);grid-template-areas:"timeline" "preview" "composer"}
   body.assistant-open .stage{height:clamp(240px,46vh,520px)}
 }
+.msg .trace{font-size:11px;color:var(--dim)}
+.approval{display:grid;gap:6px;padding:9px 10px;border-radius:9px;border:1px solid var(--accent-line);background:var(--accent-soft);white-space:normal}
+.approval b{font-size:12.5px}
+.approval small{color:var(--sub)}

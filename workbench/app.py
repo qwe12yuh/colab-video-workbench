@@ -344,7 +344,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/director/rewrite":
                 return self.json(200, director.rewrite(data))
             if path == "/api/assistant":
-                return self.json(200, director.assistant(data))
+                import agent
+                return self.json(200, agent.run(data, read_project, lambda: [
+                    {"id": p.parent.name, "title": load_json(p)["title"]} for p in safe_projects()]))
             if path == "/api/quick":
                 return self.json(201, new_reference_project(data))
             if path == "/api/new":
