@@ -27,20 +27,21 @@ jobs:
         id: setup
         shell: pwsh
         run: |
-          wsl.exe -d Ubuntu-24.04 -u root -- bash -ec '
+          $script = @'
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git python3 python3-venv ffmpeg >/tmp/compat-apt.log || { cat /tmp/compat-apt.log; exit 1; }
             git clone -q https://github.com/qwe12yuh/colab-video-workbench.git /root/colab-video-workbench
             cd /root/colab-video-workbench
             git switch --detach 9f852411cb77bbb14224e37e8ee3c84bf1f4a399
             python3 --version
-          '
+          '@
+          ($script -replace "`r", '') | wsl.exe -d Ubuntu-24.04 -u root -- bash -es
           if ($LASTEXITCODE) { throw 'Ubuntu setup failed' }
 
       - name: Run repository tests in WSL2
         shell: pwsh
         run: |
-          wsl.exe -d Ubuntu-24.04 -u root --cd /root/colab-video-workbench -- bash -c '
+          $script = @'
             status=0
             for test in smoke workbench_smoke gpu_acquire director voice_job agent_loop; do
               echo "=== tests/$test.py"
@@ -51,10 +52,12 @@ jobs:
               /tmp/compat-venv/bin/pip -q install mcp==1.27.0 &&
               /tmp/compat-venv/bin/python tests/workbench_mcp.py || status=1
             exit "$status"
-          '
+          '@
+          ($script -replace "`r", '') | wsl.exe -d Ubuntu-24.04 -u root --cd /root/colab-video-workbench -- bash -s
           if ($LASTEXITCODE) { throw 'WSL2 tests failed' }
 
       - name: Install desktop app from the documented WSL UNC path
+        id: install
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         shell: pwsh
         run: |
@@ -74,6 +77,7 @@ jobs:
           if ($createdShortcut.TargetPath -ne (Join-Path $desktopApp 'venv\Scripts\pythonw.exe')) { throw 'Wrong desktop shortcut target' }
 
       - name: Open the desktop window with real WebView2
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: pwsh
         run: |
           $webView = Join-Path $env:RUNNER_TEMP 'webview2-setup.exe'
