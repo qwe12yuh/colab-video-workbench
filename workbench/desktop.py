@@ -81,6 +81,7 @@ def main():
     if args.smoke_window:
         if not proof:
             raise RuntimeError("WebView2 window did not load the project.")
+        sys.stdout.reconfigure(errors="backslashreplace")
         print("WebView2 loaded project: " + proof[0])
 
 

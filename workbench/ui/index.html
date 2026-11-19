@@ -228,7 +228,7 @@
 <dialog id="setup-dialog">
 <div class="dialog-content"><h2>连接 Google Colab</h2>
 <p id="setup-info">点击「刷新 Colab」检查授权和余额。没有授权时可运行首次设置。</p>
-<ol class="setup-steps"><li>在 Ubuntu 24.04 WSL 中安装 Python、uv 和 Google Cloud CLI。</li><li>按终端提示在 Google 页面授权。</li><li>回到工作台刷新连接。生成任务结束后会释放工作台申请的 GPU。</li></ol>
+<ol class="setup-steps"><li>在运行工作台的 macOS 或 Ubuntu（含 WSL）终端安装 uv 和 Google Cloud CLI。</li><li>按终端提示在 Google 页面授权。</li><li>回到工作台刷新连接。生成任务结束后会释放工作台申请的 GPU。</li></ol>
 <pre>bash workbench/bootstrap.sh auth</pre>
 <div class="dialog-actions"><button id="install" class="quiet">安装依赖</button><button id="auth" class="primary">在终端授权</button><button data-close="setup-dialog" class="quiet">关闭</button></div></div>
 </dialog>

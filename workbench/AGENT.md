@@ -2,7 +2,7 @@
 
 在工作台点「复制给 Agent」，把剪贴板里的整段指令发给能访问这台电脑的 Agent。它会得到当前项目 ID、可执行的连接检查和 MCP 配置，兼容 stdio MCP 的客户端可以注册这些工具。
 
-在 Ubuntu 内可以从仓库根目录手动启动 MCP 进程。它复用正在运行的工作台服务：
+在 macOS 或 Ubuntu（含 WSL）可以从仓库根目录手动启动 MCP 进程。它复用正在运行的工作台服务：
 
 ```bash
 uv run --python 3.12 --with mcp==1.27.0 python workbench/agent_mcp.py

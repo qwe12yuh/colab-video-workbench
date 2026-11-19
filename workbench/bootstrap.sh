@@ -11,8 +11,20 @@ for tool in ffmpeg ffprobe ssh-keygen; do
   command -v "$tool" >/dev/null || missing+=("$tool")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
-  sudo apt-get update
-  sudo apt-get install -y ffmpeg openssh-client
+  case "$(uname -s)" in
+    Darwin)
+      if ! command -v brew >/dev/null; then
+        echo "Install Homebrew (https://brew.sh), then run this setup again. Missing: ${missing[*]}" >&2
+        exit 1
+      fi
+      if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then brew install ffmpeg; fi
+      if ! command -v ssh-keygen >/dev/null; then brew install openssh; fi
+      ;;
+    Linux)
+      sudo apt-get update
+      sudo apt-get install -y ffmpeg openssh-client
+      ;;
+  esac
 fi
 if ! command -v uv >/dev/null; then
   echo "Install uv, then run this setup again: https://docs.astral.sh/uv/getting-started/installation/"
@@ -26,7 +38,7 @@ if [ "${1:-}" != auth ]; then
   exit 0
 fi
 if ! command -v gcloud >/dev/null; then
-  echo "Install gcloud CLI in Ubuntu: https://cloud.google.com/sdk/docs/install-sdk"
+  echo "Install Google Cloud CLI in the terminal running the workbench: https://cloud.google.com/sdk/docs/install-sdk"
   exit 1
 fi
 if [ -s "$profile/application_default_credentials.json" ]; then

@@ -947,7 +947,7 @@ $("gateway-login").onclick = handle(async () => {
   if (window.pywebview?.api?.open_codex_login) {
     await window.pywebview.api.open_codex_login();
     gatewayMessage("按官方终端提示登录，完成后回来检查本机登录。");
-  } else gatewayMessage("在 WSL 运行 codex login，再回来检查本机登录。");
+  } else gatewayMessage("在运行工作台的终端环境执行 codex login，再回来检查本机登录。");
 },gatewayMessage);
 $("gateway-form").onsubmit = handle(async event => {
   event.preventDefault();
@@ -1001,7 +1001,7 @@ $("agent").onclick = handle(async () => {
 });
 $("copy-agent").onclick = handle(async () => {
   $("agent-config").select();
-  $("copy-agent").textContent = await copyText(agentText) ? "已复制" : "按 Ctrl+C 复制";
+  $("copy-agent").textContent = await copyText(agentText) ? "已复制" : "请手动复制所选文本";
 });
 let gpuDraft = null;
 function renderGpuDialog() {
@@ -1475,12 +1475,12 @@ $("batch").onclick = handle(() => enqueue("generate",pendingIds()));
 $("export").onclick = handle(() => enqueue("cut"));
 $("install").onclick = handle(async () => {
   if (window.pywebview?.api) await window.pywebview.api.open_setup("install");
-  else notice("请在 Ubuntu WSL 的项目目录运行 bash workbench/bootstrap.sh。");
+  else notice("请在仓库根目录运行 bash workbench/bootstrap.sh。");
 });
 $("auth").onclick = handle(async () => {
   if (busy()) throw Error("任务运行期间请保持当前授权。");
   if (window.pywebview?.api) await window.pywebview.api.open_setup("auth");
-  else notice("请在 Ubuntu WSL 的项目目录运行 bash workbench/bootstrap.sh auth。");
+  else notice("请在仓库根目录运行 bash workbench/bootstrap.sh auth。");
 });
 $("new-form").onsubmit = handle(async event => {
   event.preventDefault();
