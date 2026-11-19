@@ -34,19 +34,24 @@ jobs:
           wsl.exe -d Ubuntu-24.04 -u root -- bash -ec "mkdir -p /root/colab-video-workbench; tar -xf '$linuxArchive' -C /root/colab-video-workbench --strip-components=1; python3 --version"
           if ($LASTEXITCODE) { throw 'PR source preparation failed' }
 
-      - name: Prepare dependencies and check out the PR commit
-        timeout-minutes: 5
+      - name: Transfer test dependencies from the Windows host
+        timeout-minutes: 6
         shell: pwsh
         run: |
-          $script = @'
-            apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=12 update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=12 install -y -qq python3-venv ffmpeg >/tmp/compat-apt.log || { cat /tmp/compat-apt.log; exit 1; }
-            cd /root/colab-video-workbench
-            python3 --version
-          '@
-          $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($script -replace "`r", '') + "`n"))
-          wsl.exe -d Ubuntu-24.04 -u root -- bash -ec "echo $encoded | base64 -d > /tmp/compat-setup.sh; bash -e /tmp/compat-setup.sh"
-          if ($LASTEXITCODE) { throw 'Ubuntu setup failed' }
+          $deps = Join-Path $env:RUNNER_TEMP 'workbench-linux-deps'
+          New-Item -ItemType Directory -Force -Path $deps | Out-Null
+          foreach ($tool in @('ffmpeg','ffprobe')) {
+            curl.exe -fsSL --retry 3 "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/$tool-linux-x64" -o (Join-Path $deps $tool)
+            if ($LASTEXITCODE) { throw "$tool download failed" }
+          }
+          python -m pip install uv
+          if ($LASTEXITCODE) { throw 'uv install failed' }
+          $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          & (Join-Path $scripts 'uv.exe') pip install --only-binary :all: --target (Join-Path $deps 'mcp') --python-platform x86_64-manylinux_2_28 --python-version 3.12 mcp==1.27.0
+          if ($LASTEXITCODE) { throw 'Linux MCP dependency resolution failed' }
+          $linuxDeps = '/mnt/' + $deps.Substring(0,1).ToLowerInvariant() + $deps.Substring(2).Replace('\','/')
+          wsl.exe -d Ubuntu-24.04 -u root -- bash -ec "install -m 755 '$linuxDeps/ffmpeg' '$linuxDeps/ffprobe' /usr/local/bin; cp -a '$linuxDeps/mcp' /root/compat-mcp; ffmpeg -version | head -n 1"
+          if ($LASTEXITCODE) { throw 'Linux dependency transfer failed' }
 
       - name: Run repository tests in WSL2
         shell: pwsh
@@ -58,9 +63,7 @@ jobs:
               python3 "tests/$test.py" || status=1
             done
             bash tests/colab-lifecycle.sh || status=1
-            python3 -m venv /tmp/compat-venv &&
-              /tmp/compat-venv/bin/pip -q install mcp==1.27.0 &&
-              /tmp/compat-venv/bin/python tests/workbench_mcp.py || status=1
+            PYTHONPATH=/root/compat-mcp python3 tests/workbench_mcp.py || status=1
             exit "$status"
           '@
           $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($script -replace "`r", '') + "`n"))
