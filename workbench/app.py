@@ -60,7 +60,9 @@ def read_project(name):
         found = shot.media.is_file() and (shot.source or (shot.folder / "render.json").is_file())
         qa = shot.folder / "asr.json"
         asr = load_json(qa) if qa.is_file() and found else None
-        if asr and asr.get("trim_start", 0) != shot.row.get("trim_start", 0):
+        expected = "".join(line["text"] for line in shot.row.get("dialogue", []))
+        if asr and (asr.get("trim_start", 0) != shot.row.get("trim_start", 0)
+                    or asr.get("expected") != expected):
             asr = None
         videos.append({"id": shot.id, "key": shot.key[:8], "source": shot.source,
                        "state": "approved" if approved(shot) else "review" if found else "pending",
