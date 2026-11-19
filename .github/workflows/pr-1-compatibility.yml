@@ -23,16 +23,25 @@ jobs:
           wsl.exe -d Ubuntu-24.04 -u root -- uname -a
           if ($LASTEXITCODE) { throw 'WSL2 boot failed' }
 
-      - name: Prepare dependencies and check out the PR commit
+      - name: Extract the exact PR commit in WSL2
         id: setup
         shell: pwsh
         run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'workbench-source.tar.gz'
+          curl.exe -fsSL --retry 3 https://codeload.github.com/qwe12yuh/colab-video-workbench/tar.gz/40c2f30233545eff36f3ed6498047d21d068f1ac -o $archive
+          if ($LASTEXITCODE) { throw 'PR source download failed' }
+          $linuxArchive = '/mnt/' + $archive.Substring(0,1).ToLowerInvariant() + $archive.Substring(2).Replace('\','/')
+          wsl.exe -d Ubuntu-24.04 -u root -- bash -ec "mkdir -p /root/colab-video-workbench; tar -xf '$linuxArchive' -C /root/colab-video-workbench --strip-components=1; python3 --version"
+          if ($LASTEXITCODE) { throw 'PR source preparation failed' }
+
+      - name: Prepare dependencies and check out the PR commit
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
           $script = @'
-            apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git python3 python3-venv ffmpeg >/tmp/compat-apt.log || { cat /tmp/compat-apt.log; exit 1; }
-            git clone -q https://github.com/qwe12yuh/colab-video-workbench.git /root/colab-video-workbench
+            apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=12 update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=12 install -y -qq python3-venv ffmpeg >/tmp/compat-apt.log || { cat /tmp/compat-apt.log; exit 1; }
             cd /root/colab-video-workbench
-            git switch --detach 40c2f30233545eff36f3ed6498047d21d068f1ac
             python3 --version
           '@
           $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($script -replace "`r", '') + "`n"))
@@ -57,6 +66,36 @@ jobs:
           $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($script -replace "`r", '') + "`n"))
           wsl.exe -d Ubuntu-24.04 -u root --cd /root/colab-video-workbench -- bash -ec "echo $encoded | base64 -d > /tmp/compat-tests.sh; bash /tmp/compat-tests.sh"
           if ($LASTEXITCODE) { throw 'WSL2 tests failed' }
+
+
+  desktop:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - name: Start Ubuntu 24.04 in WSL2
+        shell: pwsh
+        run: |
+          wsl.exe --version
+          $archive = Join-Path $env:RUNNER_TEMP 'ubuntu-rootfs.tar.gz'
+          $instance = Join-Path $env:RUNNER_TEMP 'ubuntu-wsl'
+          curl.exe -fL --retry 3 https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz -o $archive
+          if ($LASTEXITCODE) { throw 'Ubuntu download failed' }
+          wsl.exe --import Ubuntu-24.04 $instance $archive --version 2
+          if ($LASTEXITCODE) { throw 'WSL2 import failed' }
+          wsl.exe --list --verbose
+          wsl.exe -d Ubuntu-24.04 -u root -- uname -a
+          if ($LASTEXITCODE) { throw 'WSL2 boot failed' }
+
+      - name: Extract the exact PR commit in WSL2
+        id: setup
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'workbench-source.tar.gz'
+          curl.exe -fsSL --retry 3 https://codeload.github.com/qwe12yuh/colab-video-workbench/tar.gz/40c2f30233545eff36f3ed6498047d21d068f1ac -o $archive
+          if ($LASTEXITCODE) { throw 'PR source download failed' }
+          $linuxArchive = '/mnt/' + $archive.Substring(0,1).ToLowerInvariant() + $archive.Substring(2).Replace('\','/')
+          wsl.exe -d Ubuntu-24.04 -u root -- bash -ec "mkdir -p /root/colab-video-workbench; tar -xf '$linuxArchive' -C /root/colab-video-workbench --strip-components=1; python3 --version"
+          if ($LASTEXITCODE) { throw 'PR source preparation failed' }
 
       - name: Install desktop app from the documented WSL UNC path
         id: install
