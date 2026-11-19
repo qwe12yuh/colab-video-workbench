@@ -1,0 +1,85 @@
+name: PR 1 Windows compatibility
+on:
+  push:
+    branches: [codex/pr-1-compatibility-test]
+permissions: {}
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - name: Start Ubuntu 24.04 in WSL2
+        shell: pwsh
+        run: |
+          wsl.exe --version
+          $archive = Join-Path $env:RUNNER_TEMP 'ubuntu-rootfs.tar.gz'
+          $instance = Join-Path $env:RUNNER_TEMP 'ubuntu-wsl'
+          curl.exe -fL --retry 3 https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz -o $archive
+          if ($LASTEXITCODE) { throw 'Ubuntu download failed' }
+          wsl.exe --import Ubuntu-24.04 $instance $archive --version 2
+          if ($LASTEXITCODE) { throw 'WSL2 import failed' }
+          wsl.exe --list --verbose
+          wsl.exe -d Ubuntu-24.04 -u root -- uname -a
+          if ($LASTEXITCODE) { throw 'WSL2 boot failed' }
+
+      - name: Prepare dependencies and check out v1.2.0
+        id: setup
+        shell: pwsh
+        run: |
+          wsl.exe -d Ubuntu-24.04 -u root -- bash -ec '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git python3 python3-venv ffmpeg >/tmp/compat-apt.log || { cat /tmp/compat-apt.log; exit 1; }
+            git clone -q https://github.com/qwe12yuh/colab-video-workbench.git /root/colab-video-workbench
+            cd /root/colab-video-workbench
+            git switch --detach 9f852411cb77bbb14224e37e8ee3c84bf1f4a399
+            python3 --version
+          '
+          if ($LASTEXITCODE) { throw 'Ubuntu setup failed' }
+
+      - name: Run repository tests in WSL2
+        shell: pwsh
+        run: |
+          wsl.exe -d Ubuntu-24.04 -u root --cd /root/colab-video-workbench -- bash -c '
+            status=0
+            for test in smoke workbench_smoke gpu_acquire director voice_job agent_loop; do
+              echo "=== tests/$test.py"
+              python3 "tests/$test.py" || status=1
+            done
+            bash tests/colab-lifecycle.sh || status=1
+            python3 -m venv /tmp/compat-venv &&
+              /tmp/compat-venv/bin/pip -q install mcp==1.27.0 &&
+              /tmp/compat-venv/bin/python tests/workbench_mcp.py || status=1
+            exit "$status"
+          '
+          if ($LASTEXITCODE) { throw 'WSL2 tests failed' }
+
+      - name: Install desktop app from the documented WSL UNC path
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          python -m pip install uv
+          if ($LASTEXITCODE) { throw 'uv install failed' }
+          $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          $env:PATH = "$scripts;$env:PATH"
+          $setup = '\\wsl.localhost\Ubuntu-24.04\root\colab-video-workbench\workbench\install-windows.ps1'
+          & $setup
+          $desktopApp = Join-Path $env:LOCALAPPDATA 'ColabVideoWorkbench'
+          $config = Get-Content -Raw (Join-Path $desktopApp 'desktop-config.json') | ConvertFrom-Json
+          if ($config.distro -ne 'Ubuntu-24.04' -or $config.linux_root -ne '/root/colab-video-workbench') { throw 'Wrong WSL config' }
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Colab 影像工作台.lnk'
+          if (!(Test-Path -LiteralPath $shortcut)) { throw 'Desktop shortcut is missing' }
+          $WScript = New-Object -ComObject WScript.Shell
+          $createdShortcut = $WScript.CreateShortcut($shortcut)
+          if ($createdShortcut.TargetPath -ne (Join-Path $desktopApp 'venv\Scripts\pythonw.exe')) { throw 'Wrong desktop shortcut target' }
+
+      - name: Open the desktop window with real WebView2
+        shell: pwsh
+        run: |
+          $webView = Join-Path $env:RUNNER_TEMP 'webview2-setup.exe'
+          curl.exe -fL --retry 3 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -o $webView
+          if ($LASTEXITCODE) { throw 'WebView2 download failed' }
+          Start-Process -Wait -FilePath $webView -ArgumentList '/silent','/install'
+          $desktopApp = Join-Path $env:LOCALAPPDATA 'ColabVideoWorkbench'
+          & (Join-Path $desktopApp 'venv\Scripts\python.exe') (Join-Path $desktopApp 'desktop.py') --smoke-window
+          if ($LASTEXITCODE) { throw 'WebView2 desktop smoke test failed' }
