@@ -2,19 +2,19 @@
 
 ## 启动
 
-在 Ubuntu 24.04 安装 Python 3.12、FFmpeg 和 Git，从 [仓库首页](../README.md) 克隆项目。从仓库根目录运行 `python3 workbench/app.py serve`，在浏览器打开 [本机工作台](http://127.0.0.1:8765)。
+在 macOS 或 Ubuntu 24.04（含 WSL2）按 [快速开始](../README.md#快速开始) 安装 Python 3.12、FFmpeg 和 Git，然后用浏览器打开 [本机工作台](http://127.0.0.1:8765)。
 
 Windows 桌面窗口需要 WSL2 Ubuntu 24.04、Edge WebView2 Runtime 和 Windows 版 [uv](https://docs.astral.sh/uv/getting-started/installation/)。把仓库克隆在 WSL 文件系统。在 PowerShell 7 进入该仓库的 Windows UNC 路径，再执行：
 
 ```powershell
-./workbench/install-windows.ps1 -Launch
+pwsh -NoProfile -ExecutionPolicy Bypass -File ./workbench/install-windows.ps1 -Launch
 ```
 
-脚本自动识别仓库所在的 WSL 分发和路径，并创建「Colab 影像工作台」桌面快捷方式。也可用 `-Distro` 和 `-LinuxRoot` 显式指定。Ubuntu 端另外安装 uv 以使用 MCP、转写和 Colab CLI。
+这条命令的执行策略仅适用于启动的 PowerShell 进程，用来运行 WSL 路径下的未签名脚本。脚本自动识别仓库所在的 WSL 分发和路径，并创建「Colab 影像工作台」桌面快捷方式。也可用 `-Distro` 和 `-LinuxRoot` 显式指定。Ubuntu 端另外安装 uv 以使用 MCP、转写和 Colab CLI。
 
 ## 连接 Colab
 
-在 Ubuntu 安装 [Google Cloud CLI](https://cloud.google.com/sdk/docs/install-sdk)，从工作台「连接与首次设置」安装依赖并授权。也可以在 Ubuntu 终端运行：
+在运行工作台的环境中安装 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 [Google Cloud CLI](https://cloud.google.com/sdk/docs/install-sdk)。Windows 桌面窗口可以从「连接与首次设置」打开 WSL 终端。浏览器用户可直接在 macOS 或 Ubuntu 终端进入仓库根目录，运行：
 
 ```bash
 bash workbench/bootstrap.sh

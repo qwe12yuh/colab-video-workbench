@@ -83,6 +83,12 @@ def gate(name, blocking=True):
 
 
 def live(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if sys.platform == "darwin":
+        state = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "stat="],
+                               capture_output=True, text=True).stdout.strip()
+        return bool(state) and not state.startswith("Z")
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].strip()[0] != "Z"
     except (OSError, IndexError):

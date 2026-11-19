@@ -30,9 +30,9 @@ cleanup() {
 }
 trap cleanup EXIT
 # Priority list, e.g. VIDEO_COLAB_GPUS=G4,H100,A100. A100 must report 80 GB or it is released and retried.
-python3 "$tool_dir/workbench/gpu.py" --session "$session" --cli "$cli" "${identity[@]}" \
+python3 "$tool_dir/workbench/gpu.py" --session "$session" --cli "$cli" ${identity[@]+"${identity[@]}"} \
   --gpus "${VIDEO_COLAB_GPUS:-G4}" --rounds "${VIDEO_COLAB_GPU_ROUNDS:-3}" --wait "${VIDEO_COLAB_GPU_WAIT:-45}"
 trap 'exit 130' INT
 trap 'exit 143' TERM
-python3 "$tool_dir/cloud.py" "$@" --session "$session" --cli "$cli" "${identity[@]}" \
+python3 "$tool_dir/cloud.py" "$@" --session "$session" --cli "$cli" ${identity[@]+"${identity[@]}"} \
   --timeout-minutes "${VIDEO_COLAB_TIMEOUT_MINUTES:-90}"

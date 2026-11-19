@@ -109,6 +109,16 @@ def smoke(temp):
     try:
         proc = start()
         assert {row["id"] for row in request("/api/projects")} == {"demo"}
+        mcp = request("/api/agent-config")["mcpServers"]["colab-workbench"]
+        distro = os.environ.get("WSL_DISTRO_NAME")
+        if distro:
+            assert mcp["command"] == "wsl.exe"
+            assert mcp["args"][:5] == ["-d", distro, "--", "env", f"COLAB_WORKBENCH_PORT={port}"]
+        else:
+            assert Path(mcp["command"]).is_absolute() and Path(mcp["command"]).name == "uv"
+            assert mcp["env"] == {"COLAB_WORKBENCH_PORT": str(port)}
+        assert mcp["args"][-1] == str(ROOT / "workbench/agent_mcp.py")
+
         def wait_job(job):
             for _ in range(120):
                 state = request("/api/job/" + job["id"])
@@ -169,7 +179,20 @@ def smoke(temp):
         proc = start()
         state = wait_job(job)
         assert "Approved s01" in state["log"]
-        print("Workbench PASS: quick reference images, gateway transport, current export, CSRF, media range, job persistence.")
+
+        # Simulate a worker that has not written progress since entering a long step.
+        record = temp / "jobs" / job["id"] / "job.json"
+        row = json.loads(record.read_text())
+        row.update(status="running", pid=os.getpid(), updated=time.time() - 20)
+        record.write_text(json.dumps(row))
+        assert request("/api/jobs")[0]["status"] == "running"
+        assert request("/api/cancel", {"job": job["id"]})["accepted"]
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait(timeout=5)
+        row.update(pid=child.pid)
+        record.write_text(json.dumps(row))
+        assert request("/api/jobs")[0]["status"] == "interrupted"
+        print("Workbench PASS: quick reference images, gateway, export, CSRF, media, job recovery and MCP config.")
     finally:
         if proc and proc.poll() is None:
             proc.terminate()

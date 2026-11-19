@@ -2,7 +2,7 @@
 
 一个跑在本机的短片工作台：一张参考图加一句中文要求，就能在 Google Colab 上用 MiniMax H3 生成带对白的视频镜头；也可以导入角色、编排多镜头分镜、给角色合成音色，逐镜审片后导出 MP4 和 SRT。
 
-A local short-video workbench with a Windows WebView2 shell and a WSL/Python backend. It renders shots with MiniMax H3 on Google Colab GPUs, synthesizes character voices with Qwen3-TTS, and edits and exports locally with FFmpeg. An optional LLM gateway adds an AI director and a tool-using assistant.
+A local short-video workbench for macOS and Ubuntu, with a Windows WebView2 desktop app backed by WSL2. It renders shots with MiniMax H3 on Google Colab GPUs, synthesizes character voices with Qwen3-TTS, and edits and exports locally with FFmpeg. An optional LLM gateway adds an AI director and a tool-using assistant.
 
 ## 功能
 
@@ -20,7 +20,16 @@ A local short-video workbench with a Windows WebView2 shell and a WSL/Python bac
 
 ## 快速开始
 
-在 Ubuntu 24.04（Windows 用户使用 WSL2）安装 Git、Python 3.12 和 FFmpeg：
+**macOS**（使用 [Homebrew](https://brew.sh)）
+
+```bash
+brew install git python@3.12 ffmpeg
+git clone https://github.com/qwe12yuh/colab-video-workbench.git
+cd colab-video-workbench
+open "$(python3.12 workbench/app.py ensure)"
+```
+
+**Ubuntu 24.04 / Windows WSL2**
 
 ```bash
 sudo apt-get install git python3 ffmpeg
@@ -35,7 +44,7 @@ Windows 桌面快捷方式、角色导入和完整操作流程见 [使用指南]
 
 ## 连接 Colab
 
-安装 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 [Google Cloud CLI](https://cloud.google.com/sdk/docs/install-sdk)，在仓库根目录执行：
+在运行工作台的环境中安装 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 [Google Cloud CLI](https://cloud.google.com/sdk/docs/install-sdk)（macOS 可用 `brew install uv`）。在仓库根目录执行：
 
 ```bash
 bash workbench/bootstrap.sh

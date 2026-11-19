@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Colab Video Workbench local service. Run inside Ubuntu WSL."""
+"""Colab Video Workbench local service for macOS and Ubuntu, including WSL."""
 import argparse
 import base64
 import binascii
@@ -288,11 +288,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, {"app": APP, "version": "1.2"})
             if path == "/api/agent-config":
                 uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
-                args = ["-d", os.environ.get("WSL_DISTRO_NAME", "Ubuntu-24.04"), "--",
-                        "env", f"COLAB_WORKBENCH_PORT={self.server.server_port}",
-                        uv, "run", "--python", "3.12", "--with", "mcp==1.27.0", "python",
+                port = str(self.server.server_port)
+                args = ["run", "--python", "3.12", "--with", "mcp==1.27.0", "python",
                         str(HERE / "agent_mcp.py")]
-                return self.json(200, {"mcpServers": {"colab-workbench": {"command": "wsl.exe", "args": args}}})
+                distro = os.environ.get("WSL_DISTRO_NAME")
+                if distro:
+                    server = {"command": "wsl.exe", "args": ["-d", distro, "--", "env",
+                              f"COLAB_WORKBENCH_PORT={port}", uv, *args]}
+                else:
+                    server = {"command": uv, "args": args, "env": {"COLAB_WORKBENCH_PORT": port}}
+                return self.json(200, {"mcpServers": {"colab-workbench": server}})
             if path == "/api/projects":
                 return self.json(200, [{"id": p.parent.name, "title": load_json(p)["title"]} for p in safe_projects()])
             if path == "/api/jobs":

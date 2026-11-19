@@ -105,7 +105,7 @@ def codex_executable():
         return str(path)
     if path := shutil.which("codex"):
         return path
-    raise ValueError("在 WSL 安装官方 Codex CLI 后再连接。")
+    raise ValueError("在运行工作台的终端环境中安装官方 Codex CLI 后再连接。")
 
 
 def codex_env():
