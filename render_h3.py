@@ -38,8 +38,8 @@ def render(project, jobs, runtime):
     from pika_h3.core.wrapper import H3DiffusionWrapper
 
     validate_runtime()
-    if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).total_memory < 90 * 2**30:
-        raise RuntimeError("The staged Ref2VA profile needs a 96 GB class CUDA GPU.")
+    if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).total_memory < 76 * 2**30:
+        raise RuntimeError("The staged Ref2VA profile needs an 80 GB or 96 GB class CUDA GPU.")
     width, height = project.canvas[:2]
 
     def load(path):

@@ -150,14 +150,52 @@ def save(data):
         return public(config)
 
 
-def polish_with_codex(text, row):
+def active_profile():
+    config = registry()
+    row = next((row for row in config["profiles"] if row["id"] == config["active"]), None)
+    if not row:
+        raise ValueError("请先在「模型网关」保存一个模型连接。")
+    return row
+
+
+def parse_json(text):
+    """Accept a bare JSON object, or one wrapped in prose or a code fence."""
+    if not isinstance(text, str):
+        return None
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        value = json.loads(text[start:end + 1]) if 0 <= start < end else None
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def ask_json(system, text, schema, max_tokens=1500, timeout=120):
+    """Ask the active model for one JSON object that follows schema. Returns (object, model label)."""
+    row = active_profile()
+    if row["kind"] == "codex":
+        value = codex_json(system + "\n\n" + text, schema, row, timeout)
+    else:
+        reply = api_request(row, "/chat/completions", {"model": row["model"], "stream": False,
+            "max_tokens": max_tokens, "messages": [
+                {"role": "system", "content": system + "\n只输出一个 JSON 对象，结构为：" + json.dumps(schema, ensure_ascii=False)},
+                {"role": "user", "content": text}]}, timeout=timeout)
+        try:
+            value = parse_json(reply["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError):
+            value = None
+    if not isinstance(value, dict):
+        raise ValueError("模型没有返回可用的结构化结果，请重试或换一个模型。")
+    return value, row["model"] or row["name"]
+
+
+def codex_json(prompt, schema_value, row, timeout=100):
     codex_status()
     with tempfile.TemporaryDirectory(prefix="workbench-agent-") as scratch:
         root = Path(scratch)
         output = root / "reply.json"
         schema = root / "schema.json"
-        schema.write_text(json.dumps({"type":"object","additionalProperties":False,
-            "properties":{"prompt":{"type":"string"}},"required":["prompt"]}), encoding="utf-8")
+        schema.write_text(json.dumps(schema_value), encoding="utf-8")
         command = [codex_executable(), "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
                    "--skip-git-repo-check", "-s", "read-only",
                    "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "plugins",
@@ -165,21 +203,24 @@ def polish_with_codex(text, row):
                    "-c", 'approval_policy="never"', "--output-schema", str(schema), "-o", str(output)]
         if row["model"]:
             command += ["-m", row["model"]]
-        result = subprocess.run(command + ["-"], cwd=root, env=codex_env(), input=SYSTEM + "\n\n" + text,
-                                text=True, capture_output=True, timeout=100)
+        result = subprocess.run(command + ["-"], cwd=root, env=codex_env(), input=prompt,
+                                text=True, capture_output=True, timeout=timeout)
         if result.returncode or not output.is_file():
             raise RuntimeError("官方 Codex CLI 没有返回可用结果。请检查登录和模型。")
-        return json.loads(output.read_text(encoding="utf-8")).get("prompt")
+        return parse_json(output.read_text(encoding="utf-8"))
+
+
+def polish_with_codex(text, row):
+    value = codex_json(SYSTEM + "\n\n" + text, {"type":"object","additionalProperties":False,
+        "properties":{"prompt":{"type":"string"}},"required":["prompt"]}, row)
+    return (value or {}).get("prompt")
 
 
 def polish(data):
     text = data.get("prompt")
     if not isinstance(text, str) or not 1 <= len(text.strip()) <= 1800:
         raise ValueError("先输入视频要求，再进行润色。")
-    config = registry()
-    row = next((row for row in config["profiles"] if row["id"] == config["active"]), None)
-    if not row:
-        raise ValueError("请先在「模型网关」保存一个模型连接。")
+    row = active_profile()
     if row["kind"] == "codex":
         output = polish_with_codex(text.strip(), row)
     else:

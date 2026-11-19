@@ -16,11 +16,12 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 from studio import Project, load_json, pending, save_json
+import gpu as gpus
 
 STATE = Path(os.getenv("COLAB_WORKBENCH_STATE", Path.home() / ".local/share/colab-video-workbench"))
-CLI = HERE / "colab.sh"
+CLI = Path(os.getenv("COLAB_WORKBENCH_CLI", HERE / "colab.sh"))  # override for tests
 ACTIVE = {"queued", "running"}
-ACTIONS = {"generate", "qa", "approve", "cut", "release"}
+ACTIONS = {"generate", "qa", "approve", "cut", "release", "voice"}
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 URL = re.compile(r"https?://[^\s\"'<>]+")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -115,18 +116,32 @@ def enqueue(data):
         else:
             name = data.get("project")
             project = Project(project_path(name))
-            ids = data.get("shots", [])
+            ids = data.get("shots", []) if action != "voice" else []
             if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids):
                 raise ValueError("无效的镜头列表")
             shots = project.select(ids)
+            plan = voice_request = None
+            if action == "voice":
+                import voice
+                voice_request = voice.validate(data, project)
+                if voice_request["engine"] == "colab":
+                    if any(old.get("may_own_runtime") for old in rows):
+                        raise ValueError("请先释放上一个未确认释放的运行时")
+                    plan = gpus.normalize(data.get("gpu"), gpus.TTS_GPUS)
+                shots = []
             if action == "generate":
                 if any(old.get("may_own_runtime") for old in rows):
                     raise ValueError("请先释放上一个未确认释放的运行时")
                 shots = pending(shots)
                 if not shots:
                     raise ValueError("选中的镜头已经生成，可从审片区播放")
+                plan = gpus.normalize(data.get("gpu"))
             row = {"project": name, "shots": [shot.id for shot in shots],
-                   "session": f"cvw-{job_id}" if action == "generate" else None}
+                   "session": f"cvw-{job_id}" if action == "generate" or plan else None}
+            if plan:
+                row["gpu_plan"] = plan
+            if voice_request:
+                row["voice"] = voice_request
         row.update(id=job_id, action=action, status="queued", step="queued",
                    created=time.time(), updated=time.time(), may_own_runtime=False)
         path = job_path(job_id)
@@ -192,6 +207,47 @@ def execute(path, row, tag, args, limit, log, cancellable=True, check=True):
     return child.returncode
 
 
+def acquire_gpu(path, row, identity, log, table=gpus.GPUS):
+    """Try each GPU in the job's plan, verify memory with nvidia-smi, and release wrong cards."""
+    session = row["session"]
+
+    def say(text):
+        log.write((text + "\n").encode())
+        row.update(gpu_note=text, updated=time.time())
+        save_json(path, row)
+
+    def run(argv, timeout):
+        row["gpu_attempts"] = row.get("gpu_attempts", 0) + 1
+        # Finish each allocation request before reacting to cancel so stop can find the assignment.
+        try:
+            return execute(path, row, "allocate", [str(CLI), *argv], timeout, log,
+                           cancellable=False, check=False) == 0
+        except TimeoutError:
+            say("[抢卡] 申请超时")
+            return False
+
+    def probe():
+        row.update(step="verify_gpu", updated=time.time())
+        save_json(path, row)
+        try:
+            result = subprocess.run([str(CLI), "ssh", "-s", session, "-i", str(identity), "--", *gpus.SMI],
+                                    capture_output=True, stdin=subprocess.DEVNULL, text=True,
+                                    errors="replace", timeout=90, cwd=ROOT)
+        except subprocess.TimeoutExpired:
+            return ""
+        log.write(clean(result.stdout + result.stderr)[-2000:].encode())
+        return result.stdout
+
+    def release():
+        return execute(path, row, "release", [str(CLI), "stop", "-s", session], 55, log,
+                       cancellable=False, check=False) == 0
+
+    found = gpus.acquire(session, row.get("gpu_plan") or None, run, probe, release,
+                         cancelled=lambda: path.with_name("cancel").exists(), say=say, table=table)
+    row.update(gpu=found, gpu_note=f"已就绪：{found['name']} · {found['mib'] / 1024:.0f} GiB")
+    save_json(path, row)
+
+
 def generate(path, row, log):
     manifest = project_path(row["project"])
     project = Project(manifest)
@@ -204,13 +260,11 @@ def generate(path, row, log):
     if path.with_name("cancel").exists():
         raise Cancelled("任务已取消")
     row["may_own_runtime"] = True
+    identity = STATE / "ssh_ed25519"
     try:
-        # Finish the allocation request before reacting to cancel so stop can find the assignment.
-        execute(path, row, "allocate", [str(CLI), "new", "-s", row["session"], "--gpu", "G4"], 105, log,
-                cancellable=False)
+        acquire_gpu(path, row, identity, log)
         if path.with_name("cancel").exists():
             raise Cancelled("任务已取消")
-        identity = STATE / "ssh_ed25519"
         args = [sys.executable, "-u", str(ROOT / "cloud.py"), str(manifest), *row["shots"],
                 "--session", row["session"], "--cli", str(CLI), "--identity", str(identity),
                 "--timeout-minutes", "90"]
@@ -224,6 +278,43 @@ def generate(path, row, log):
         if not clear:
             row["may_own_runtime"] = False
             save_json(path, row)
+
+
+def synthesize(path, row, log):
+    """Voice job: a small GPU (or a TTS API) produces candidate reference voices for one character."""
+    import voice
+    request, project_root = row["voice"], project_path(row["project"]).parent
+    staging = path.with_name("voice-out")
+    if request["engine"] == "api":
+        row.update(step="voice", updated=time.time())
+        save_json(path, row)
+        voice.api_synthesize(request, staging, log)
+    else:
+        if request.get("ref"):
+            request = dict(request, ref_file=str(project_root / request["ref"]))
+        request_file = path.with_name("voice-request.json")
+        save_json(request_file, request)
+        execute(path, row, "auth", [str(CLI), "usage"], 45, log)
+        if path.with_name("cancel").exists():
+            raise Cancelled("任务已取消")
+        row["may_own_runtime"] = True
+        identity = STATE / "ssh_ed25519"
+        try:
+            acquire_gpu(path, row, identity, log, table=gpus.TTS_GPUS)
+            if path.with_name("cancel").exists():
+                raise Cancelled("任务已取消")
+            execute(path, row, "voice", [sys.executable, "-u", str(HERE / "voice_cloud.py"), "--request",
+                    str(request_file), "--out", str(staging), "--session", row["session"], "--cli", str(CLI),
+                    "--identity", str(identity)], 30 * 60, log)
+        finally:
+            clear = execute(path, row, "release", [str(CLI), "stop", "-s", row["session"]], 55,
+                            log, cancellable=False, check=False)
+            if not clear:
+                row["may_own_runtime"] = False
+                save_json(path, row)
+    row["voice_candidates"] = voice.store(project_root, staging)
+    save_json(path, row)
+    shutil.rmtree(staging, ignore_errors=True)
 
 
 def work(job_id):
@@ -246,6 +337,8 @@ def work(job_id):
                     manifest = str(project_path(row["project"]))
                     if action == "generate":
                         generate(path, row, log)
+                    elif action == "voice":
+                        synthesize(path, row, log)
                     elif action == "qa":
                         uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
                         execute(path, row, "qa", [uv, "run", "--python", "3.12", "--with",
@@ -256,7 +349,7 @@ def work(job_id):
                 if row["may_own_runtime"]:
                     raise RuntimeError("结果已处理，但 GPU 未确认释放")
                 row.update(status="complete", step="done")
-            except Cancelled as error:
+            except (Cancelled, gpus.Cancelled) as error:
                 row.update(status="cancelled", error=str(error))
             except Exception as error:
                 row.update(status="failed", error=clean(str(error))[-1000:])

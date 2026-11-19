@@ -3,16 +3,61 @@
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const statusText = {pending:"待生成",review:"待审片",approved:"已确认",running:"生成中"};
-const labels = {generate:"生成视频",qa:"对白转写",approve:"确认镜头",cut:"导出成片",release:"释放 GPU"};
+const labels = {generate:"生成视频",qa:"对白转写",approve:"确认镜头",cut:"导出成片",release:"释放 GPU",voice:"合成音色"};
 const statuses = {queued:"排队",running:"执行中",complete:"完成",failed:"失败",cancelled:"已取消",interrupted:"已中断"};
-const stages = {queued:"准备",auth:"验证授权",allocate:"申请 G4",render:"准备渲染",
-                release:"释放 GPU",qa:"转写对白",approve:"检查素材",cut:"剪辑并验证",done:"完成"};
+const stages = {queued:"准备",auth:"验证授权",allocate:"抢占显卡",verify_gpu:"核验显存",render:"准备渲染",
+                release:"释放 GPU",voice:"合成音色",qa:"转写对白",approve:"检查素材",cut:"剪辑并验证",done:"完成"};
+const generateSteps = [["auth","授权"],["allocate","抢卡"],["verify_gpu","验显存"],["render","渲染"],["release","释放"]];
+const voiceSteps = [["auth","授权"],["allocate","抢小卡"],["verify_gpu","验显存"],["voice","合成"],["release","释放"]];
+const voicePresets = ["二十多岁的女性，声音清澈温柔，语速偏慢","三十多岁的男性，嗓音低沉稳重，略带沙哑",
+  "十几岁的少年，声音明亮有朝气","七十岁左右的老人，声音苍老缓慢、和蔼","字正腔圆的播音腔，干净有力","慵懒随性的成熟女声，尾音上扬"];
+let voiceCatalog = null, voiceActor = "";
+const fallbackGpus = [{id:"G4",label:"G4 · RTX PRO 6000 96GB",min_mib:90000},
+  {id:"H100",label:"H100 · 80GB",min_mib:79000},{id:"A100",label:"A100 · 只要 80GB",min_mib:79000}];
+const gpuDefault = {gpus:["G4"],rounds:3,wait:45,high_mem:true};
 let project, projects = [], jobs = [], currentShot = "", focusedJob = "", editorTab = "shot";
 let savedManifest, dirty = false, working = false, exportPreview = null, previewEnd = null;
 let gatewayConfig = {active:"",profiles:[]}, quickThumb = "", agentText = "";
 let syncing, ownerState = "", usageAt = 0, usageRequest, jobFingerprints = new Map(), changedProjects = new Set();
 const cancelling = new Set();
+let gpuOptions = fallbackGpus, gpuPlan = loadGpuPlan(), noticeTimer = 0;
+let directorPlan = null, aiBusy = "", lastRewrite = null, voiceRefresh = false;
+let colabState = "", assistantMessages = [], assistantBusy = false, nextActions = [];
+let agentTranscript = [], agentSession = "";
+const traceLabels = {workbench_status:"任务状态",read_job:"任务日志",read_project:"项目分镜",colab_usage:"Colab 余额",doctor:"环境自检"};
+function pendingText(pending) {
+  const args = pending.args || {}, parts = [];
+  if (args.job_id) {
+    const row = jobs.find(item => item.id === args.job_id);
+    parts.push(row ? labels[row.action] + " · " + projectTitle(row.project) : "任务 " + String(args.job_id).slice(0,8));
+  }
+  if (Array.isArray(args.gpus) && args.gpus.length) parts.push("显卡 " + args.gpus.map(gpuName).join(" → "));
+  if (Number.isInteger(args.rounds)) parts.push(args.rounds + " 轮");
+  if (pending.name === "retry_job") parts.push("生成或合成会消耗 Colab 算力");
+  return parts.join(" · ");
+}
+const rewritePresets = [["cinematic","更有电影感"],["emotion","强化情绪"],["camera","补全运镜"],
+  ["concise","精简要点"],["continuity","衔接前后"],["custom","自定义…"]];
 
+function loadGpuPlan() {
+  try {
+    const value = JSON.parse(localStorage.getItem("gpuPlan") || "null");
+    if (value && Array.isArray(value.gpus) && value.gpus.length) return {...gpuDefault,...value};
+  } catch (_) {}
+  return {...gpuDefault};
+}
+const gpuName = id => ({G4:"G4 96G",H100:"H100 80G",A100:"A100 80G",L4:"L4 24G",T4:"T4 16G"})[id] || id;
+const gpuSummary = () => gpuPlan.gpus.map(gpuName).join(" → ") + " · " + gpuPlan.rounds + " 轮";
+function renderGpuSummary() {
+  $("gpu-summary").textContent = gpuSummary();
+  $("quick-gpu").textContent = gpuSummary();
+}
+function gpuWarning(shots) {
+  if (gpuPlan.gpus.includes("G4")) return "";
+  const long = (shots || []).filter(row => Number(row.seconds) > 7);
+  return long.length ? "只选了 80GB 卡：" + long.map(row => row.id.toUpperCase()).join("、")
+    + " 超过 7 秒，显存可能不足。建议把 G4 加入候选或缩短镜头。" : "";
+}
 async function request(path, body) {
   const init = body === undefined ? {} : {method:"POST",
     headers:{"Content-Type":"application/json","X-Workbench":"1"},body:JSON.stringify(body)};
@@ -22,9 +67,11 @@ async function request(path, body) {
   return value;
 }
 function notice(message, error=false) {
+  clearTimeout(noticeTimer);
   $("notice").textContent = message;
   $("notice").hidden = !message;
   $("notice").classList.toggle("error",error);
+  if (message && !error) noticeTimer = setTimeout(() => {$("notice").hidden = true;},4200);
 }
 function handle(operation, feedback=notice) {
   return async (...args) => {
@@ -100,14 +147,27 @@ function renderNav() {
   replaceMarkup($("projects"), projects.map(row => button(row.title,"project",row.id,row.id === project?.id ? "on" : "",
     row.id === project?.id ? 'aria-current="page"' : "")).join(""));
 }
+function shotThumb(row) {
+  const actor = project.manifest.characters[row.cast?.[0]];
+  if (row.source) return '<span class="shot-thumb">MP4</span>';
+  return actor?.image ? '<span class="shot-thumb"><img alt="" loading="lazy" src="' + esc(assetURL(actor.image)) + '"></span>'
+    : '<span class="shot-thumb">' + esc(row.id.toUpperCase()) + '</span>';
+}
 function renderTimeline() {
-  replaceMarkup($("shots"), project.manifest.shots.map(row => {
+  const shots = project.manifest.shots;
+  replaceMarkup($("shots"), shots.map((row,index) => {
     const state = takeState(row.id), selected = row.id === currentShot && !exportPreview;
     return '<button type="button" class="shot-chip' + (selected ? ' on' : '') + '" data-action="shot" data-value="'
-      + esc(row.id) + '" aria-pressed="' + selected + '"><strong>' + esc(row.id.toUpperCase() + " · " + row.title)
-      + '</strong><span class="group"><small>' + esc(row.seconds) + ' 秒</small><span class="badge ' + state + '">'
-      + statusText[state] + '</span></span></button>';
+      + esc(row.id) + '" aria-pressed="' + selected + '">' + shotThumb(row) + '<strong><em>'
+      + String(index+1).padStart(2,"0") + '</em>' + esc(row.title) + '</strong><span class="shot-meta"><small>'
+      + esc(row.seconds) + ' 秒</small><span class="badge ' + state + '">' + statusText[state] + '</span></span></button>';
   }).join(""));
+  replaceMarkup($("ruler"), shots.map(row => '<span class="' + takeState(row.id)
+    + (row.id === currentShot && !exportPreview ? " on" : "") + '" data-action="shot" data-value="' + esc(row.id)
+    + '" data-grow="' + esc(row.seconds) + '" title="' + esc(row.id.toUpperCase() + " · " + row.seconds + " 秒") + '"></span>').join(""));
+  for (const item of $("ruler").children) item.style.flexGrow = item.dataset.grow;
+  const total = shots.reduce((sum,row) => sum + Number(row.seconds),0);
+  $("timeline-total").textContent = shots.length + " 镜 · " + fmt(total) + " 秒";
 }
 function updateStage() {
   if (!project || !shot()) return;
@@ -115,7 +175,7 @@ function updateStage() {
   const clip = exportPreview || take;
   const stage = $("stage");
   const url = clip?.url || "";
-  const icon = state === "running" ? "◌" : "▷";
+  const icon = state === "running" ? "◐" : "▷";
   const note = exportPreview ? (exportPreview.current && !dirty ? "当前成片" : "历史成片")
     : dirty && url ? "已保存的素材" : statusText[state];
   status($("preview-status"),note,exportPreview ? (exportPreview.current && !dirty ? "approved" : "") : state);
@@ -129,9 +189,11 @@ function updateStage() {
       + '" src="' + esc(url) + '"></video>');
   } else {
     const title = state === "running" ? "后台正在生成这个镜头" : "这个镜头还没有视频";
-    const text = state === "running" ? "右侧任务区显示进度，回传后可直接播放。"
-      : "生成后，预览将显示在这里。";
-    replaceMarkup(stage,'<div class="stage-empty"><span class="stage-symbol" aria-hidden="true">' + icon
+    const text = state === "running" ? "右侧任务区显示抢卡和渲染进度，回传后可直接播放。"
+      : current.source ? "导入的素材无法读取，请在「剪辑与字幕」重新导入。"
+      : "写好画面要求后点「抢卡并生成」，完成后在这里审片。";
+    replaceMarkup(stage,'<div class="stage-empty"><span class="stage-symbol' + (state === "running" ? " spin" : "")
+      + '" aria-hidden="true">' + icon
       + '</span><b>' + title + '</b><p>' + text + '</p></div>');
   }
   const trim = Number(current.trim_start || 0);
@@ -139,6 +201,55 @@ function updateStage() {
     + (take.asr && !dirty ? " · 转写：" + (take.asr.heard || "未识别到对白") : "") : "";
   $("preview-note").textContent = trimNote;
   $("preview-note").hidden = !trimNote;
+}
+function voiceTakes(id) {
+  const row = jobs.find(item => item.action === "voice" && item.project === project.id && item.voice?.actor === id
+    && item.status === "complete" && item.voice_candidates?.length);
+  return row ? row.voice_candidates : [];
+}
+function voiceBox(id,actor) {
+  const current = actor.voice ? '<div class="voice-take"><audio controls preload="none" src="' + esc(assetURL(actor.voice))
+    + '"></audio>' + button("移除","voice-remove",id) + '</div>'
+    : '<small>还没有音色：H3 会按画面自动配一个声音。想固定音色，上传一段 2–15 秒录音，或用 AI 合成。</small>';
+  const takes = voiceTakes(id).filter(take => take.path !== actor.voice);
+  return '<div class="voice-box"><div class="section-head"><h3>参考音色</h3>' + (actor.voice ? '<span class="badge ok">已设置</span>' : '')
+    + '</div>' + current + (takes.length ? '<small>最近合成的候选：</small>' + takes.map(take => '<div class="voice-take"><audio controls preload="none" src="'
+      + esc(assetURL(take.path)) + '"></audio>' + button("用这个 · " + fmt(take.seconds) + " 秒","voice-use",take.path,"quiet",'data-actor="' + esc(id) + '"') + '</div>').join("") : '')
+    + '<div class="group"><label class="quiet-file">上传录音<input type="file" data-asset="voice" accept="audio/wav,audio/mpeg"></label>'
+    + button("✦ AI 合成音色","voice-open",id,"quiet ai") + '</div></div>';
+}
+function aiRow(current) {
+  const disabled = aiBusy || !gatewayConfig.active ? " disabled" : "";
+  const undo = lastRewrite?.shot === current.id ? button("撤销改写","ai-undo","","quiet",aiBusy ? "disabled" : "") : "";
+  const label = aiBusy ? "改写中…" : gatewayConfig.active ? "AI 改写" : "AI 改写（先连接模型网关）";
+  return '<div class="ai-row"><span class="label"><svg aria-hidden="true"><use href="#i-spark"/></svg>' + label + '</span>'
+    + rewritePresets.map(([id,text]) => button(text,"ai-rewrite",id,"quiet",disabled)).join("") + undo + '</div>';
+}
+function shotContext(row) {
+  const manifest = project.manifest, index = manifest.shots.indexOf(row);
+  const neighbor = (item,label) => item ? label + "：" + item.action.slice(0,160) : "";
+  return {action:row.action,seconds:row.seconds,location:manifest.locations[row.location],style:manifest.style,
+    cast:row.cast.map(id => castLabel(id,manifest.characters[id]) + "：" + (manifest.characters[id]?.description || "")),
+    neighbors:[neighbor(manifest.shots[index-1],"上一镜"),neighbor(manifest.shots[index+1],"下一镜")].filter(Boolean).join("\n")};
+}
+async function rewriteShot(preset, given) {
+  const row = shot();
+  if (!row.action.trim()) throw Error("先写一点画面描述，再让 AI 改写。");
+  let instruction = given;
+  if (!instruction && preset === "custom") {
+    instruction = window.prompt("想怎么改？例如：改成黄昏逆光，人物更紧张","");
+    if (!instruction?.trim()) return;
+  }
+  aiBusy = row.id;presentEditor(true);
+  try {
+    const result = await request("/api/director/rewrite",{...shotContext(row),
+      ...(instruction ? {instruction:instruction.trim()} : {preset})});
+    if (shot() !== row) return;
+    lastRewrite = {shot:row.id,action:row.action};
+    row.action = result.action;
+    notice("已用 " + result.model + " 改写，可撤销。");
+    markDirty();
+  } finally {aiBusy = "";presentEditor(true);}
 }
 function renderEditor() {
   const current = shot();
@@ -157,8 +268,7 @@ function renderEditor() {
         + esc(id) + (actor.voice ? " · 已有音色" : "") + '</small></div></div>'
         + '<label class="field">外观说明<input data-description value="' + esc(actor.description) + '"></label>'
         + '<label>替换参考图<input type="file" data-asset="image" accept="image/png,image/jpeg"></label>'
-        + '<label>参考音色<input type="file" data-asset="voice" accept="audio/wav,audio/mpeg"></label>'
-        + (actor.voice ? button("移除音色","voice-remove",id) : "") + '</article>').join("");
+        + voiceBox(id,actor) + '</article>').join("");
   } else if (editorTab === "cut") {
     const captions = (current.subtitles || []).map((line,index) =>
       '<div class="dialogue cue" data-cue="' + index + '">'
@@ -202,7 +312,7 @@ function renderEditor() {
       ? options + '<div class="group"><small>已导入本地素材。</small>'
         + button("调裁剪和字幕","tab","cut") + button("切换为角色参考","switch-mode") + '</div>'
       : '<div class="refs" aria-label="参考角色">' + refs + button("＋ 导入角色","actor-add") + '</div>'
-        + area(quick ? "中文要求" : "画面要求 · 动作、表演与运镜","action",current.action) + options
+        + area(quick ? "中文要求" : "画面要求 · 动作、表演与运镜","action",current.action) + aiRow(current) + options
         + (quick ? '<small>对白和声音可以直接写在中文要求里。</small>' + '<div>' + button("使用分镜对白","storyboard-mode") + '</div>'
           : '<details class="details"><summary>对白 · ' + (current.dialogue || []).length + ' 句</summary>'
           + '<small>对白结尾留出约 1 秒。</small>' + dialogue + button("＋ 台词","line-add") + '</details>'
@@ -225,23 +335,24 @@ function updateActions() {
   const qa = take?.url ? button("核对对白","qa","","quiet",blocked ? "disabled" : "") : "";
   let next;
   if (takeState(current.id) === "running") next = '<span class="badge running">后台生成中</span>';
-  else if (canGenerate) next = button("生成当前镜头","generate","","primary",generateBlocked ? "disabled" : "");
+  else if (canGenerate) next = button("抢卡并生成","generate","","primary",generateBlocked ? "disabled" : "");
   else if (take?.state === "review" || dirty && take?.url && (trimChanged(current) || current.source))
     next = button("确认镜头","approve","","primary",blocked ? "disabled" : "");
   else next = '<span class="badge approved">已确认</span>';
   const regenerate = take?.url && !current.source ? button("准备新版本","seed","","quiet",currentBusy() ? "disabled" : "") : "";
-  replaceMarkup($("editor-actions"),'<span class="muted">' + (dirty ? "修改尚未保存" : project.manifest.shots.length + " 镜 · "
-    + fmt(project.manifest.shots.reduce((sum,row) => sum + Number(row.seconds),0)) + " 秒") + '</span><div class="group">'
+  const warning = canGenerate ? gpuWarning([current]) : "";
+  replaceMarkup($("editor-actions"),'<span class="' + (dirty ? "dirty-dot" : warning ? "hint warn" : "muted") + '">'
+    + esc(dirty ? "修改尚未保存" : warning || ("显卡：" + gpuSummary())) + '</span><div class="group">'
     + saveButton + qa + regenerate + next + '</div>');
   const batchCount = pendingIds().length;
   $("batch").hidden = batchCount < 2;
-  $("batch").textContent = "生成 " + batchCount + " 镜";
+  $("batch").textContent = "抢卡生成 " + batchCount + " 镜";
   $("batch").disabled = generateBlocked;
   $("quick-render").disabled = generateBlocked;
   $("add-shot").disabled = working || currentBusy();
   if (!$("quick-hint").classList.contains("job-error")) $("quick-hint").textContent = unresolved() ? "请先处理任务区尚未释放的 GPU。"
     : busy() ? "后台任务运行中，可以先保存草稿。"
-    : "生成会使用 Colab 算力，完成后自动释放 GPU。";
+    : "按「" + gpuSummary() + "」抢卡，显存不达标自动释放重抢。完成后回传并释放 GPU。";
 }
 function renderExport(row,index) {
   const current = row.current && !dirty;
@@ -267,6 +378,7 @@ function updateDelivery() {
 }
 function renderProject() {
   renderNav();
+  renderAssistant();
   $("workspace").hidden = !project;
   $("welcome").hidden = Boolean(project);
   if (!project) return;
@@ -314,7 +426,9 @@ async function locked(operation) {
   }
 }
 async function submit(action, ids=[], target) {
-  const row = await request("/api/run",{action,project:project?.id,shots:ids,target});
+  const body = {action,project:project?.id,shots:ids,target};
+  if (action === "generate") body.gpu = gpuPlan;
+  const row = await request("/api/run",body);
   focusedJob = row.id;
   notice("已提交" + labels[action] + "任务。");
   await syncJobs();
@@ -336,6 +450,18 @@ async function enqueue(action, ids=[], target) {
 
 function taskStage(row, log="") {
   if (row.cancel_requested || cancelling.has(row.id)) return row.step === "release" ? "正在释放 GPU" : "正在取消";
+  if (row.step === "release" && ["generate","voice"].includes(row.action) && !row.gpu) return "释放不合格显卡";
+  if (row.step === "voice" && log) {
+    for (const line of log.trim().split("\n").reverse()) {
+      if (line.includes("[voice] fetched")) return "回传音色候选";
+      const take = line.match(/\[voice\] take (\d+\/\d+)/);
+      if (take) return "合成候选 " + take[1];
+      if (line.includes("[voice] loading")) return "下载并加载 TTS 模型";
+      if (line.includes("[voice] installing")) return "首次安装 Qwen3-TTS";
+      if (line.includes("调用 TTS 接口")) return "调用 TTS 接口";
+    }
+    return "上传请求";
+  }
   if (row.step !== "render" || !log) return stages[row.step] || row.step;
   for (const line of log.trim().split("\n").reverse()) {
     if (line.includes("Fetched and verified")) return "已回传，核验文件";
@@ -368,6 +494,32 @@ function renderJobDetail(detail) {
     if (atEnd) log.scrollTop = log.scrollHeight;
   }
 }
+function elapsed(row) {
+  const seconds = Math.max(0,Math.round((isActive(row) ? Date.now()/1000 : row.updated) - row.created));
+  return seconds < 60 ? seconds + " 秒" : seconds < 3600 ? Math.floor(seconds/60) + " 分 " + seconds%60 + " 秒"
+    : Math.floor(seconds/3600) + " 时 " + Math.floor(seconds%3600/60) + " 分";
+}
+function when(row) {
+  const date = new Date(row.created*1000), today = new Date().toDateString() === date.toDateString();
+  return date.toLocaleString("zh-CN",today ? {hour:"2-digit",minute:"2-digit"}
+    : {month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"});
+}
+function stepper(row) {
+  const steps = row.action === "generate" ? generateSteps : row.action === "voice" && row.session ? voiceSteps : null;
+  if (!steps) return "";
+  const current = row.step === "queued" ? -1 : steps.findIndex(([id]) => id === row.step);
+  // Releasing a wrong card during allocation is part of the grab loop, not the final release.
+  const index = row.step === "release" && !row.gpu ? 1 : current;
+  return '<ol class="stepper">' + steps.map(([,label],i) =>
+    '<li class="' + (i < index ? "done" : i === index ? "now" : "") + '">' + label + '</li>').join("") + '</ol>';
+}
+function gpuLine(row) {
+  if (row.action !== "generate" && !(row.action === "voice" && row.session)) return "";
+  const plan = row.gpu_plan?.gpus?.map(gpuName).join(" → ") || (row.action === "voice" ? "L4 24G → T4 16G" : "G4 96G");
+  const text = row.gpu ? row.gpu.name + " · " + Math.round(row.gpu.mib/1024) + " GiB" + (row.gpu_attempts > 1 ? " · 第 " + row.gpu_attempts + " 次抢到" : "")
+    : (row.gpu_note || "候选：" + plan).replace(/^\[抢卡\] /,"") + (row.gpu_attempts ? " · 已尝试 " + row.gpu_attempts + " 次" : "");
+  return '<div class="job-gpu"><svg aria-hidden="true"><use href="#i-chip"/></svg><span>' + esc(text) + '</span></div>';
+}
 function renderJobs(detail) {
   const active = activeTask(), debt = unresolved();
   status($("count"),active ? "运行中" : debt ? "待释放" : "空闲",active ? "running" : debt ? "review" : "");
@@ -375,17 +527,19 @@ function renderJobs(detail) {
   if (active) {
     const pendingCancel = active.cancel_requested || cancelling.has(active.id);
     html = '<div class="job-run"><div class="section-head"><strong>' + esc(labels[active.action])
-      + '</strong><span class="badge running">' + esc(statuses[active.status]) + '</span></div><p class="job-line">'
+      + '</strong><span class="badge running">' + esc(statuses[active.status]) + ' · ' + elapsed(active) + '</span></div><p class="job-line">'
       + esc([projectTitle(active.project),active.shots?.map(id => id.toUpperCase()).join("、")].filter(Boolean).join(" · "))
-      + '</p><p class="job-line">' + esc(taskStage(active,detail?.id === active.id ? detail.log : "")) + '</p><div class="group">'
-      + button("日志","job",active.id)
+      + (active.action === "voice" ? " · " + esc(castLabel(active.voice?.actor,project?.manifest.characters[active.voice?.actor])) : "")
+      + '</p>' + stepper(active) + '<p class="job-line"><b>' + esc(taskStage(active,detail?.id === active.id ? detail.log : ""))
+      + '</b></p>' + gpuLine(active) + '<div class="group">'
+      + button("查看日志","job",active.id)
       + (active.step !== "release" ? button(pendingCancel ? "取消已请求" : "取消任务","cancel",active.id,
         "quiet",pendingCancel ? "disabled" : "") : "") + '</div></div>';
   } else if (debt) {
     html = '<div class="job-run"><strong>上次申请的 GPU 未确认释放</strong><p class="job-line">'
       + esc(projectTitle(debt.project)) + '</p>' + button("释放 GPU","release",debt.id) + '</div>';
   } else {
-    html = '<p class="job-line">当前没有正在执行的任务。</p>';
+    html = '<p class="job-line">当前没有正在执行的任务。生成时会按「' + esc(gpuSummary()) + '」抢卡。</p>';
   }
   replaceMarkup($("active-job"),html);
   const history = jobs.filter(row => row.id !== active?.id);
@@ -394,14 +548,22 @@ function renderJobs(detail) {
   replaceMarkup($("jobs"), history.slice(0,8).map(row =>
     '<button class="job-card' + (row.id === focusedJob ? " selected" : "")
     + '" data-action="job" data-value="' + esc(row.id) + '"><strong>' + esc(labels[row.action])
-    + ' · ' + esc(statuses[row.status]) + '</strong><small>' + esc(projectTitle(row.project)) + '</small></button>').join(""));
+    + (row.gpu ? " · " + esc(gpuName(row.gpu.gpu)) : "") + '</strong><span class="badge '
+    + ({complete:"ok",failed:"fail",interrupted:"fail",cancelled:""})[row.status] + '">' + esc(statuses[row.status])
+    + '</span><small>' + esc([projectTitle(row.project),when(row),elapsed(row)].filter(Boolean).join(" · ")) + '</small></button>').join(""));
   if (detail !== undefined) renderJobDetail(detail);
 }
 async function updateJobs() {
   const rows = await request("/api/jobs");
   for (const row of rows) {
     const stamp = String(row.updated) + "|" + row.status;
+    const seen = jobFingerprints.has(row.id);
     if (jobFingerprints.get(row.id) !== stamp && !isActive(row) && row.project) changedProjects.add(row.project);
+    if (seen && jobFingerprints.get(row.id) !== stamp && row.action === "voice" && row.project === project?.id) {
+      if (row.status === "complete") {editorTab = "actors";notice("音色合成完成：在「角色素材」里试听候选，点「用这个」后保存。");}
+      else if (!isActive(row)) notice("音色合成" + statuses[row.status] + "：" + (row.error || "请查看任务日志。"),true);
+      voiceRefresh = true;
+    }
     jobFingerprints.set(row.id,stamp);
     if (!isActive(row)) cancelling.delete(row.id);
   }
@@ -423,6 +585,8 @@ async function updateJobs() {
     }
   }
   if (project) {renderTimeline();updateStage();updateActions();updateDelivery();}
+  if (voiceRefresh && project) {voiceRefresh = false;presentEditor(true);}
+  renderAssistant();
   const selected = (focusedJob && jobs.find(row => row.id === focusedJob)) || active;
   renderJobs(selected ? await request("/api/job/" + selected.id) : null);
 }
@@ -436,12 +600,16 @@ function refreshUsage() {
   $("refresh").disabled = true;
   usageRequest = request("/api/usage").then(data => {
     $("balance").textContent = data.balance.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2});
-    status($("cloud-status"),data.assignments ? data.assignments + " 台 · " + data.rate.toFixed(2) + " 单元/时" : "Colab 已连接","ok");
+    $("rate").textContent = data.rate ? data.rate.toFixed(2) : "0";
+    $("runway").textContent = data.rate ? fmt(data.balance/data.rate) + " 时" : "空闲";
+    status($("cloud-status"),data.assignments ? data.assignments + " 台运行中" : "已连接",data.assignments ? "running" : "ok");
+    colabState = "ok";renderAssistant();
     $("setup-info").textContent = "账户余额 " + data.balance.toFixed(2) + " 单元。"
       + "使用工作台专用授权。";
   }).catch(error => {
-    $("balance").textContent = "—";
-    status($("cloud-status"),"Colab 未连通","fail");
+    $("balance").textContent = $("rate").textContent = $("runway").textContent = "—";
+    status($("cloud-status"),"未连通","fail");
+    colabState = "fail";renderAssistant();
     $("setup-info").textContent = error.message;
   }).finally(() => {$("refresh").disabled = false;usageRequest = null;});
   return usageRequest;
@@ -519,6 +687,20 @@ document.body.addEventListener("click",handle(async event => {
   if (action === "tab") {editorTab = value;renderEditor();return;}
   if (action === "actor-add") {$("actor-dialog").showModal();return;}
   if (action === "save") {await locked(save);return;}
+  if (action === "voice-open") {await showVoice(value);return;}
+  if (action === "voice-use") {
+    if (currentBusy()) throw Error("这个项目正在执行任务，等任务结束后再修改。");
+    project.manifest.characters[item.dataset.actor].voice = value;
+    markDirty();presentEditor();
+    notice("已设为参考音色。保存修改后生效；用到该角色对白的镜头需要重新生成。");return;
+  }
+  if (action === "ai-rewrite" || action === "ai-undo") {
+    if (currentBusy()) throw Error("这个项目正在执行任务，等任务结束后再修改。");
+    if (aiBusy) return;
+    if (action === "ai-rewrite") {await rewriteShot(value);return;}
+    if (lastRewrite?.shot === currentShot) {shot().action = lastRewrite.action;lastRewrite = null;markDirty();presentEditor(true);}
+    return;
+  }
   if (["generate","qa","approve"].includes(action)) {await enqueue(action,[currentShot]);return;}
   if (currentBusy()) throw Error("这个项目正在执行任务，等任务结束后再修改。");
   const row = shot(), manifest = project.manifest;
@@ -629,11 +811,24 @@ function quickMessage(text,error=false) {
 }
 function showQuick() {
   $("quick-hint").classList.remove("job-error");
-  updateActions();
+  if (project) updateActions();
+  else quickMessage("按「" + gpuSummary() + "」抢卡，显存不达标自动释放重抢。完成后回传并释放 GPU。");
+  renderGpuSummary();
   $("quick-dialog").showModal();
   $("polish").hidden = !gatewayConfig.active;
 }
+function syncQuickFields() {
+  const form = $("quick-form").elements;
+  $("seconds-out").textContent = form.seconds.value + " 秒";
+  $("prompt-count").textContent = form.prompt.value.length + " / 1800";
+}
+$("quick-form").addEventListener("input",syncQuickFields);
+$("quick-form").addEventListener("reset",() => setTimeout(syncQuickFields));
+for (const type of ["dragenter","dragover"]) $("quick-file-label").addEventListener(type,() => $("quick-file-label").classList.add("drag"));
+for (const type of ["dragleave","drop"]) $("quick-file-label").addEventListener(type,() => $("quick-file-label").classList.remove("drag"));
+$("quick-gpu-edit").onclick = () => showGpu();
 $("quick").onclick = $("welcome-new").onclick = showQuick;
+$("welcome-blank").onclick = () => $("new-dialog").showModal();
 $("quick-form").elements.image.onchange = event => {
   resetQuickImage();
   const file = event.target.files[0];
@@ -760,7 +955,9 @@ $("gateway-form").onsubmit = handle(async event => {
   try {
     gatewayConfig = await request("/api/gateway/save",gatewayData());
     loadGatewayProfiles();
-    gatewayMessage("已保存并启用。快速生成时可选用它润色提示词。");
+    gatewayMessage("已保存并启用。可用于快速生成润色、AI 分镜和镜头改写。");
+    if (project) presentEditor(true);
+    renderAssistant();
   } finally {$("gateway-save").disabled = false;}
 },gatewayMessage);
 $("polish").onclick = handle(async () => {
@@ -806,6 +1003,468 @@ $("copy-agent").onclick = handle(async () => {
   $("agent-config").select();
   $("copy-agent").textContent = await copyText(agentText) ? "已复制" : "按 Ctrl+C 复制";
 });
+let gpuDraft = null;
+function renderGpuDialog() {
+  const order = [...gpuDraft.gpus,...gpuOptions.map(row => row.id).filter(id => !gpuDraft.gpus.includes(id))];
+  $("gpu-list").replaceChildren(...order.map(id => {
+    const option = gpuOptions.find(row => row.id === id), rank = gpuDraft.gpus.indexOf(id), on = rank >= 0;
+    const row = document.createElement("div");
+    row.className = "gpu-row" + (on ? " on" : "");
+    row.innerHTML = '<input type="checkbox" aria-label="使用 ' + esc(option.label) + '"' + (on ? " checked" : "") + ' data-gpu="' + esc(id)
+      + '"><span class="rank">' + (on ? rank+1 : "–") + '</span><div><strong>' + esc(option.label) + '</strong><small>显存核验 ≥ '
+      + Math.floor(option.min_mib/1024) + ' GiB' + (id === "A100" ? " · 分到 40GB 自动释放重抢" : "") + '</small></div><div class="group">'
+      + '<button type="button" class="icon" data-gpu-move="-1" data-gpu="' + esc(id) + '" aria-label="提前"' + (rank > 0 ? "" : " disabled") + '>↑</button>'
+      + '<button type="button" class="icon" data-gpu-move="1" data-gpu="' + esc(id) + '" aria-label="推后"'
+      + (on && rank < gpuDraft.gpus.length-1 ? "" : " disabled") + '>↓</button></div>';
+    return row;
+  }));
+  $("gpu-rounds").value = gpuDraft.rounds;
+  $("gpu-wait").value = gpuDraft.wait;
+  $("gpu-highmem").checked = gpuDraft.high_mem;
+  const before = gpuPlan;
+  gpuPlan = gpuDraft;
+  const warning = gpuWarning(project?.manifest.shots);
+  gpuPlan = before;
+  $("gpu-warning").textContent = warning;
+  $("gpu-warning").hidden = !warning;
+}
+function showGpu() {
+  gpuDraft = structuredClone(gpuPlan);
+  renderGpuDialog();
+  $("gpu-dialog").showModal();
+}
+$("gpu-list").addEventListener("click",event => {
+  const control = event.target.closest("[data-gpu-move]");
+  if (!control) return;
+  const list = gpuDraft.gpus, index = list.indexOf(control.dataset.gpu), next = index + Number(control.dataset.gpuMove);
+  if (index < 0 || next < 0 || next >= list.length) return;
+  [list[index],list[next]] = [list[next],list[index]];
+  renderGpuDialog();
+});
+$("gpu-list").addEventListener("change",event => {
+  const id = event.target.dataset.gpu;
+  if (!id) return;
+  if (event.target.checked) gpuDraft.gpus.push(id);
+  else if (gpuDraft.gpus.length > 1) gpuDraft.gpus = gpuDraft.gpus.filter(item => item !== id);
+  renderGpuDialog();
+});
+$("gpu-form").onsubmit = handle(async event => {
+  event.preventDefault();
+  const rounds = Number($("gpu-rounds").value), wait = Number($("gpu-wait").value);
+  if (!Number.isInteger(rounds) || rounds < 1 || rounds > 30) throw Error("抢卡轮数须在 1–30 之间。");
+  if (!Number.isInteger(wait) || wait < 10 || wait > 600) throw Error("每轮间隔须在 10–600 秒之间。");
+  gpuPlan = {gpus:[...gpuDraft.gpus],rounds,wait,high_mem:$("gpu-highmem").checked};
+  try {localStorage.setItem("gpuPlan",JSON.stringify(gpuPlan));} catch (_) {}
+  $("gpu-dialog").close();
+  renderGpuSummary();
+  if (project) {updateActions();renderJobs();}
+  notice("显卡策略已保存：" + gpuSummary());
+});
+$("gpu-open").onclick = $("gpu-chip").onclick = showGpu;
+
+function voiceStatus(text,error=false) {
+  $("voice-status").textContent = text;
+  $("voice-status").classList.toggle("job-error",error);
+}
+function voiceModel() {
+  const id = $("voice-form").querySelector('input[name="model"]:checked')?.value;
+  return voiceCatalog.models.find(row => row.id === id);
+}
+function renderVoiceFields() {
+  const model = voiceModel(), form = $("voice-form").elements;
+  for (const kind of ["design","custom","clone","api"]) $("voice-" + kind).hidden = model.kind !== kind;
+  const chars = form.text.value.trim().length, seconds = chars / 4.5;
+  $("voice-length").textContent = chars + " 字 · 约 " + fmt(Math.round(seconds)) + " 秒" + (seconds > 12 ? "（超过 12 秒会截断）" : seconds < 3 ? "（太短）" : "");
+  const actor = project.manifest.characters[voiceActor], busyNow = busy() || unresolved();
+  const notes = [];
+  if (model.engine === "colab") notes.push("会按 <b>" + esc(voicePlan().map(gpuName).join(" → ")) + "</b> 抢一张小卡（显存需求：" + esc(model.vram) + "）"
+    + "。首次在新机器上约 5–8 分钟（安装 TTS、下载约 4 GB 权重），完成后自动释放，不占用渲染用的大卡。");
+  else notes.push("直接调用你的 TTS 服务，不申请 Colab 显卡，费用按该服务计。");
+  if (actor?.voice) notes.push("该角色已有音色，新候选不会自动替换；选用后，用到该角色对白的已生成镜头会变回待生成。");
+  if (busyNow) notes.push("<b>当前有任务在运行或有未释放的 GPU。</b>一次只跑一个任务，避免和 H3 渲染抢卡，等它结束后再合成。");
+  $("voice-cost").innerHTML = notes.join("<br>");
+  $("voice-submit").disabled = Boolean(busyNow);
+}
+function voicePlan() {return voiceCatalog.plan.gpus;}
+async function showVoice(actor) {
+  if (currentBusy()) throw Error("这个项目正在执行任务，等任务结束后再合成音色。");
+  voiceCatalog ||= await request("/api/voice");
+  voiceActor = actor;
+  const characters = project.manifest.characters, form = $("voice-form").elements;
+  $("voice-actor").textContent = castLabel(actor,characters[actor]);
+  if (!$("voice-models").children.length) {
+    const card = row => '<label class="model-card"><input type="radio" name="model" value="' + esc(row.id) + '"' + (row.id === "qwen3-design" ? " checked" : "")
+      + '><strong>' + esc(row.label) + '<small>' + esc(row.vram) + '</small></strong><span>' + esc(row.note) + '</span></label>';
+    $("voice-models").innerHTML = '<div class="group-title">Colab 预置模型（Qwen3-TTS，Apache-2.0）</div>'
+      + voiceCatalog.models.filter(row => row.engine === "colab").map(card).join("")
+      + '<div class="group-title">外部服务</div>' + voiceCatalog.models.filter(row => row.engine === "api").map(card).join("");
+    $("voice-presets").innerHTML = voicePresets.map(text => '<button type="button" class="quiet small" data-voice-preset="' + esc(text) + '">' + esc(text.split("，")[0]) + '</button>').join("");
+    form.speaker.replaceChildren(...voiceCatalog.speakers.map(([id,text]) => new Option(id + " · " + text,id)));
+    form.text.value = voiceCatalog.sample;
+  }
+  form.instruct.value ||= characters[actor]?.description ? "符合这个角色的声音：" + characters[actor].description : "";
+  form.api_url.value = voiceCatalog.api.base_url;form.api_model.value = voiceCatalog.api.model;
+  form.api_voice.value = voiceCatalog.api.voice;form.api_key.value = "";
+  form.api_key.placeholder = voiceCatalog.api.has_key ? "已保存，留空保留" : "不需要可留空";
+  voiceStatus("");renderVoiceFields();
+  $("voice-dialog").showModal();
+}
+$("voice-form").addEventListener("input",() => voiceCatalog && renderVoiceFields());
+$("voice-form").addEventListener("change",() => voiceCatalog && renderVoiceFields());
+$("voice-presets").addEventListener("click",event => {
+  const preset = event.target.closest("[data-voice-preset]");
+  if (preset) {$("voice-form").elements.instruct.value = preset.dataset.voicePreset;renderVoiceFields();}
+});
+$("voice-api-save").onclick = handle(async () => {
+  const form = $("voice-form").elements;
+  voiceCatalog.api = await request("/api/voice/save",{base_url:form.api_url.value.trim(),model:form.api_model.value.trim(),
+    voice:form.api_voice.value.trim(),key:form.api_key.value});
+  form.api_key.value = "";form.api_key.placeholder = voiceCatalog.api.has_key ? "已保存，留空保留" : "不需要可留空";
+  voiceStatus("接口已保存。");
+},message => voiceStatus(message,true));
+$("voice-form").onsubmit = handle(async event => {
+  event.preventDefault();
+  const form = event.target.elements, model = voiceModel();
+  if (busy() || unresolved()) throw Error("等当前任务结束或释放 GPU 后再合成音色。");
+  const body = {action:"voice",project:project.id,actor:voiceActor,model:model.id,text:form.text.value,
+    count:Number(form.count.value)};
+  if (model.kind === "design") body.instruct = form.instruct.value;
+  if (model.kind === "custom") {body.speaker = form.speaker.value;body.instruct = form.tone.value;}
+  if (model.kind === "api") {
+    if (!voiceCatalog.api.base_url) throw Error("先填写并保存兼容 TTS 接口。");
+    body.speaker = form.api_voice.value.trim();body.instruct = form.api_instruct.value;
+  }
+  $("voice-submit").disabled = true;
+  try {
+    if (model.kind === "clone") {
+      if (!form.ref.files[0]) throw Error("先选择一段 3 秒以上的录音。");
+      voiceStatus("正在上传录音…");
+      body.ref = await uploadFile(project.id,form.ref.files[0]);body.ref_text = form.ref_text.value;
+    }
+    if (model.engine === "colab") body.gpu = {gpus:voicePlan()};
+    const row = await request("/api/run",body);
+    focusedJob = row.id;
+    $("voice-dialog").close();
+    editorTab = "actors";presentEditor();
+    notice("已提交音色合成。进度看右侧任务区，完成后在「角色素材」试听并选用。");
+    await syncJobs();
+  } finally {renderVoiceFields();}
+},message => voiceStatus(message,true));
+
+/* Assistant: local next-step guide always works; the connected model adds conversation. */
+function nextSteps() {
+  const steps = [], debt = unresolved(), active = activeTask();
+  if (debt) steps.push({title:"先释放上次的 GPU",text:"上次申请的运行时没有确认释放，可能还在计费。",action:{type:"release",label:"释放 GPU"}});
+  if (colabState === "fail") steps.push({title:"连接 Colab",text:"生成视频和合成音色都需要 Colab 授权。",action:{type:"open_setup",label:"打开连接设置"}});
+  if (!project) {
+    steps.push({title:"从一张参考图开始",text:"上传人物或场景图，写一句中文要求，选时长和画幅。",action:{type:"open_quick",label:"快速生成"}});
+    return steps;
+  }
+  if (active) steps.push({title:"后台正在" + labels[active.action],text:"可以继续编辑其他内容，进度在右侧任务区。",action:null});
+  if (dirty) steps.push({title:"有未保存的修改",text:"保存后才能生成或导出。",action:{type:"save",label:"保存修改"}});
+  const shots = project.manifest.shots, characters = project.manifest.characters;
+  const pend = pendingIds(), review = shots.filter(row => takeState(row.id) === "review").map(row => row.id);
+  if (shots.length === 1 && !shots[0].source && gatewayConfig.active)
+    steps.push({title:"扩展成多镜头短片",text:"用 AI 分镜把一句创意拆成带景别、运镜和对白的几个镜头。",action:{type:"director",label:"打开 AI 分镜"}});
+  const speaking = new Set(shots.flatMap(row => (row.dialogue || []).map(line => line.speaker)));
+  const mute = [...speaking].filter(id => characters[id] && !characters[id].voice);
+  if (mute.length) steps.push({title:"给 " + mute.map(id => castLabel(id,characters[id])).join("、") + " 配音色",
+    text:"有对白但没有参考音色时，H3 会随机配声音。可以上传录音或在 Colab 小卡上合成。",action:{type:"open_voice",label:"合成音色",args:{actor:mute[0]}}});
+  if (pend.length && !active && !dirty) steps.push({title:pend.length + " 个镜头待生成",
+    text:"会按「" + gpuSummary() + "」抢卡，显存不达标自动释放重抢。" + (gpuWarning(shots.filter(row => pend.includes(row.id))) || ""),
+    action:{type:"generate",label:"抢卡生成 " + pend.map(id => id.toUpperCase()).join("、"),args:{shots:pend}}});
+  if (review.length) steps.push({title:"审片：" + review.map(id => id.toUpperCase()).join("、"),
+    text:"播放检查画面、口型和对白，需要时点「核对对白」，满意后确认。",action:{type:"select_shot",label:"去审 " + review[0].toUpperCase(),args:{shot:review[0]}}});
+  const done = shots.every(row => takeState(row.id) === "approved"), exported = project.exports.some(row => row.current);
+  if (done && !exported && !dirty) steps.push({title:"可以导出了",text:"全部镜头已确认，合成 MP4 和 SRT。",action:{type:"export",label:"导出成片"}});
+  if (done && exported) steps.push({title:"成片已导出",text:"在右侧「本集成片」预览或保存 MP4。想改的话直接编辑镜头再重新生成。",action:null});
+  if (!gatewayConfig.active) steps.push({title:"连接模型，解锁 AI 助手",text:"连接兼容 API 或本机 Codex 后，可以直接对话、AI 分镜和改写镜头。不连也能正常使用。",action:{type:"open_gateway",label:"连接模型网关"}});
+  return steps.slice(0,4);
+}
+function assistantState() {
+  const characters = project?.manifest.characters || {};
+  const failed = jobs.find(row => ["failed","interrupted"].includes(row.status));
+  const active = activeTask();
+  return {
+    project: project ? {id:project.id,title:project.manifest.title,aspect:project.manifest.aspect,style:project.manifest.style,unsaved:dirty,
+      exported:project.exports.some(row => row.current)} : null,
+    current_shot: currentShot || null,
+    shots: project ? project.manifest.shots.map(row => ({id:row.id,title:row.title,seconds:row.seconds,state:takeState(row.id),
+      imported:Boolean(row.source),cast:row.cast,dialogue_lines:(row.dialogue || []).length,action:(row.action || "").slice(0,140)})) : [],
+    characters: Object.entries(characters).map(([id,actor]) => ({id,label:castLabel(id,actor),has_voice:Boolean(actor.voice)})),
+    active_job: active ? {action:active.action,step:active.step,note:active.gpu_note || ""} : null,
+    last_failure: failed ? {action:failed.action,error:(failed.error || "").slice(0,300)} : null,
+    unreleased_gpu: Boolean(unresolved()), gpu_plan: gpuSummary(), colab: colabState || "unknown",
+    balance: $("balance").textContent, other_projects: projects.map(row => row.title).slice(0,8)
+  };
+}
+function renderAssistant() {
+  if ($("assistant").hidden) return;
+  const steps = nextSteps();
+  nextActions = steps.map(step => step.action);
+  replaceMarkup($("assistant-next"), steps.length ? steps.map((step,index) => '<div class="next-card"><b>' + esc(step.title) + '</b><span>'
+    + esc(step.text) + '</span>' + (step.action ? '<button type="button" class="quiet small" data-assist="next:' + index + '">'
+    + esc(step.action.label) + '</button>' : '') + '</div>').join("") : '<div class="next-card"><span>一切就绪。</span></div>');
+  const model = gatewayConfig.profiles.find(row => row.id === gatewayConfig.active);
+  $("assistant-model").textContent = model ? "已连接 " + (model.model || model.name) + " · 可以直接对话" : "未连接模型 · 显示操作引导";
+  $("assistant-form").elements.q.disabled = !model;
+  $("assistant-send").disabled = !model || assistantBusy;
+  $("assistant-form").elements.q.placeholder = model ? "说说你想做什么，例如：帮我做一个 20 秒的雨夜重逢短片" : "连接模型网关后可以直接对话";
+  replaceMarkup($("assistant-suggest"), model && !assistantMessages.length ? ["帮我把这个项目扩展成 4 个镜头","这个镜头怎么改更有电影感？",
+    "上次任务为什么失败了？","帮我检查一下环境"].map(text => '<button type="button" class="quiet" data-assist-ask="' + esc(text) + '">' + esc(text) + '</button>').join("") : "");
+  replaceMarkup($("assistant-chat"), assistantMessages.map((message,index) => '<div class="msg ' + (message.role === "user" ? "user" : "bot")
+    + (message.error ? " error" : "") + '">' + (message.trace?.length ? '<span class="trace">查看了：'
+      + esc([...new Set(message.trace)].map(name => traceLabels[name] || name).join("、")) + '</span>' : '')
+    + (message.thinking ? '<span class="thinking">正在查看状态和日志…</span>' : esc(message.content))
+    + (message.pending ? '<div class="approval"><b>需要你批准：' + esc(message.pending.title) + '</b><small>' + esc(pendingText(message.pending))
+      + '</small>' + (message.decided ? '<span class="muted">' + esc(message.decided) + '</span>'
+      : '<div class="group"><button type="button" class="primary small" data-assist-approve="' + index + ':1">批准</button>'
+      + '<button type="button" class="quiet small" data-assist-approve="' + index + ':0">拒绝</button></div>') + '</div>' : '')
+    + (message.actions?.length ? '<div class="group">' + message.actions.map((action,j) => '<button type="button" class="'
+      + (["generate","export"].includes(action.type) ? "primary" : "quiet") + ' small" data-assist="' + index + ':' + j + '">'
+      + esc(action.label) + '</button>').join("") + '</div>' : '') + '</div>').join(""));
+}
+function toggleAssistant(open) {
+  $("assistant").hidden = !open;
+  document.body.classList.toggle("assistant-open",open);
+  try {localStorage.setItem("assistant",open ? "1" : "");} catch (_) {}
+  if (open) {renderAssistant();if (!$("assistant-form").elements.q.disabled) $("assistant-form").elements.q.focus();}
+}
+async function askAssistant(text, decision) {
+  if (assistantBusy || (!decision && !text.trim())) return;
+  assistantBusy = true;
+  if (!decision) assistantMessages.push({role:"user",content:text.trim()});
+  assistantMessages.push({role:"assistant",thinking:true});
+  renderAssistant();
+  const scroll = () => {$("assistant-body").scrollTop = $("assistant-body").scrollHeight;};
+  scroll();
+  try {
+    const result = await request("/api/assistant",{session:agentSession || undefined,transcript:agentTranscript.slice(-40),
+      state:assistantState(),...(decision ? {decision} : {message:text.trim()})});
+    agentSession = result.session;agentTranscript = result.transcript;
+    assistantMessages[assistantMessages.length-1] = {role:"assistant",content:result.reply,actions:result.actions,
+      trace:result.trace,pending:result.pending};
+    if (decision || result.trace?.length) void syncJobs().catch(() => {});
+  } catch (error) {
+    assistantMessages[assistantMessages.length-1] = {role:"assistant",content:error.message,error:true};
+  } finally {
+    assistantBusy = false;assistantMessages = assistantMessages.slice(-24);renderAssistant();scroll();
+  }
+}
+async function runAssistant(action) {
+  const args = action.args || {}, shots = project?.manifest.shots || [];
+  const known = id => shots.some(row => row.id === id);
+  const needProject = () => {if (!project) throw Error("先打开或创建一个项目。");};
+  switch (action.type) {
+    case "open_quick": {
+      showQuick();
+      const form = $("quick-form").elements;
+      if (typeof args.prompt === "string") form.prompt.value = args.prompt.slice(0,1800);
+      if (Number.isInteger(args.seconds) && args.seconds >= 3 && args.seconds <= 12) form.seconds.value = args.seconds;
+      if (["portrait","landscape"].includes(args.aspect)) form.aspect.value = args.aspect;
+      syncQuickFields();return;
+    }
+    case "director": {
+      needProject();$("director-open").click();
+      const form = $("director-form").elements;
+      if (typeof args.idea === "string") form.idea.value = args.idea.slice(0,1500);
+      if (Number.isInteger(args.shots) && args.shots >= 1 && args.shots <= 8) {form.shots.value = args.shots;$("director-count").textContent = args.shots + " 镜";}
+      if (typeof args.tone === "string") {
+        const match = [...form.tone].find(input => input.value && input.value.startsWith(args.tone.slice(0,4)));
+        if (match) match.checked = true;
+      }
+      return;
+    }
+    case "select_shot": needProject();if (!known(args.shot)) throw Error("找不到镜头 " + args.shot);selectShot(args.shot);return;
+    case "edit_shot": {
+      needProject();
+      if (currentBusy() || working) throw Error("这个项目正在执行任务，等任务结束后再修改。");
+      const row = shots.find(item => item.id === args.shot);
+      if (!row) throw Error("找不到镜头 " + args.shot);
+      if (typeof args.title === "string" && args.title.trim()) row.title = args.title.trim().slice(0,40);
+      if (Number.isInteger(args.seconds) && args.seconds >= 3 && args.seconds <= 12) row.seconds = args.seconds;
+      if (typeof args.action === "string" && args.action.trim()) row.action = args.action.trim().slice(0,1800);
+      currentShot = row.id;editorTab = "shot";markDirty();renderProject();
+      notice("已修改 " + row.id.toUpperCase() + "，检查后点「保存修改」。");return;
+    }
+    case "rewrite_shot": {
+      needProject();if (!known(args.shot)) throw Error("找不到镜头 " + args.shot);
+      selectShot(args.shot);
+      await rewriteShot(args.preset || "custom",typeof args.instruction === "string" ? args.instruction : undefined);return;
+    }
+    case "save": needProject();await locked(save);return;
+    case "generate": {
+      needProject();
+      const ids = (Array.isArray(args.shots) ? args.shots : [currentShot]).filter(known);
+      if (!ids.length) throw Error("没有可生成的镜头。");
+      if (!window.confirm("将按「" + gpuSummary() + "」抢卡并生成 " + ids.map(id => id.toUpperCase()).join("、") + "，会消耗 Colab 计算单元。继续？")) return;
+      await enqueue("generate",ids);return;
+    }
+    case "approve": {
+      needProject();
+      const ids = (Array.isArray(args.shots) ? args.shots : [currentShot]).filter(id => known(id) && takeState(id) === "review");
+      if (!ids.length) throw Error("没有待确认的镜头。");
+      if (!window.confirm("确认你已经看过 " + ids.map(id => id.toUpperCase()).join("、") + " 并满意？")) return;
+      await enqueue("approve",ids);return;
+    }
+    case "export": needProject();await enqueue("cut");return;
+    case "open_voice": {
+      needProject();
+      const actor = project.manifest.characters[args.actor] ? args.actor : Object.keys(project.manifest.characters)[0];
+      if (!actor) throw Error("先导入一个角色。");
+      editorTab = "actors";presentEditor();await showVoice(actor);
+      const form = $("voice-form").elements;
+      const model = [...form.model].find(input => input.value === args.model);
+      if (model) model.checked = true;
+      if (typeof args.instruct === "string" && args.instruct.trim()) form.instruct.value = args.instruct.slice(0,300);
+      renderVoiceFields();return;
+    }
+    case "add_actor": needProject();$("actor-dialog").showModal();return;
+    case "set_gpu": {
+      const gpus = (Array.isArray(args.gpus) ? args.gpus : []).filter((id,i,list) => ["G4","H100","A100"].includes(id) && list.indexOf(id) === i);
+      if (!gpus.length) {showGpu();return;}
+      gpuPlan = {...gpuPlan,gpus,...(Number.isInteger(args.rounds) && args.rounds >= 1 && args.rounds <= 30 ? {rounds:args.rounds} : {})};
+      try {localStorage.setItem("gpuPlan",JSON.stringify(gpuPlan));} catch (_) {}
+      renderGpuSummary();if (project) updateActions();
+      notice("显卡策略已改为：" + gpuSummary());return;
+    }
+    case "release": {
+      const debt = unresolved();
+      if (!debt) throw Error("没有待释放的 GPU。");
+      await enqueue("release",[],debt.id);return;
+    }
+    case "open_gateway": $("gateway").click();return;
+    case "open_setup": $("setup").click();return;
+    default: throw Error("暂不支持这个操作。");
+  }
+}
+$("assistant-toggle").onclick = () => toggleAssistant($("assistant").hidden);
+$("assistant-close").onclick = () => toggleAssistant(false);
+$("assistant").addEventListener("click",handle(async event => {
+  const approve = event.target.closest("[data-assist-approve]");
+  if (approve) {
+    const [index,allow] = approve.dataset.assistApprove.split(":"), message = assistantMessages[Number(index)];
+    if (!message?.pending || message.decided || assistantBusy) return;
+    message.decided = allow === "1" ? "已批准，正在执行…" : "已拒绝";
+    renderAssistant();
+    await askAssistant("",{...message.pending,allow:allow === "1"});
+    message.decided = allow === "1" ? "已批准" : "已拒绝";
+    renderAssistant();
+    return;
+  }
+  const ask = event.target.closest("[data-assist-ask]");
+  if (ask) {await askAssistant(ask.dataset.assistAsk);return;}
+  const target = event.target.closest("[data-assist]");
+  if (!target) return;
+  const [first,second] = target.dataset.assist.split(":");
+  const action = first === "next" ? nextActions[Number(second)] : assistantMessages[Number(first)]?.actions?.[Number(second)];
+  if (action) await runAssistant(action);
+}));
+$("assistant-form").onsubmit = handle(async event => {
+  event.preventDefault();
+  const field = event.target.elements.q, text = field.value;
+  field.value = "";
+  await askAssistant(text);
+});
+$("assistant-form").elements.q.addEventListener("keydown",event => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {event.preventDefault();$("assistant-form").requestSubmit();}
+});
+try {if (localStorage.getItem("assistant")) toggleAssistant(true);} catch (_) {}
+
+function directorStatus(text,error=false) {
+  $("director-status").textContent = text;
+  $("director-status").classList.toggle("job-error",error);
+}
+function renderPlan() {
+  const plan = directorPlan;
+  if (!plan) {
+    $("director-result").innerHTML = '<div class="director-empty">方案会显示在这里</div>';
+    $("director-meta").textContent = "";$("director-apply").disabled = true;return;
+  }
+  const characters = project.manifest.characters;
+  $("director-result").innerHTML = plan.shots.map((row,index) => '<label class="plan-shot"><input type="checkbox" checked data-plan="'
+    + index + '"><strong><em>' + String(index+1).padStart(2,"0") + '</em>' + esc(row.title) + '</strong><div class="plan-tags">'
+    + [row.seconds + " 秒",row.shot_size,row.camera,...row.cast.map(id => castLabel(id,characters[id]))].filter(Boolean)
+      .map(tag => '<span>' + esc(tag) + '</span>').join("") + '</div><p>' + esc(row.action) + '</p>'
+    + (row.dialogue.length || row.sound ? '<ul>' + row.dialogue.map(line => '<li><b>' + esc(castLabel(line.speaker,characters[line.speaker]))
+      + '</b> ' + fmt(line.start) + '–' + fmt(line.end) + ' 秒：' + esc(line.text) + '</li>').join("")
+      + (row.sound ? '<li>声音：' + esc(row.sound) + '</li>' : '') + '</ul>' : '') + '</label>').join("");
+  updatePlanMeta();
+}
+function pickedShots() {
+  return [...$("director-result").querySelectorAll("[data-plan]:checked")].map(input => directorPlan.shots[Number(input.dataset.plan)]);
+}
+function updatePlanMeta() {
+  const picked = pickedShots(), total = picked.reduce((sum,row) => sum + row.seconds,0);
+  // Measured on G4: about 16 s sampling plus 8 s decoding per second of video, excluding environment setup.
+  $("director-meta").textContent = picked.length + " 镜 · " + total + " 秒 · 预计渲染约 " + Math.max(1,Math.round(total*24/60)) + " 分钟";
+  $("director-apply").disabled = !picked.length;
+}
+$("director-result").addEventListener("change",updatePlanMeta);
+$("director-form").addEventListener("input",event => {
+  if (event.target.name === "shots") $("director-count").textContent = event.target.value + " 镜";
+});
+$("director-open").onclick = () => {
+  if (!project) return;
+  directorStatus(gatewayConfig.active ? "" : "还没有连接模型。点左下角「模型网关」连接兼容 API 或本机 Codex 后再生成方案。",!gatewayConfig.active);
+  $("director-run").disabled = !gatewayConfig.active;
+  renderPlan();
+  $("director-dialog").showModal();
+};
+$("director-form").onsubmit = handle(async event => {
+  event.preventDefault();
+  const form = event.target.elements, characters = Object.entries(project.manifest.characters);
+  if (!characters.length) throw Error("先在「角色素材」导入至少一个角色。");
+  $("director-run").disabled = true;
+  directorStatus("模型正在拆分镜头，通常需要 10–60 秒…");
+  try {
+    directorPlan = await request("/api/director/storyboard",{idea:form.idea.value,shots:Number(form.shots.value),
+      tone:form.tone.value,aspect:project.manifest.aspect,locations:project.manifest.locations,
+      characters:characters.map(([id,actor]) => ({id,label:castLabel(id,actor),description:actor.description}))});
+    renderPlan();
+    directorStatus("由 " + directorPlan.model + " 生成。取消勾选不需要的镜头，再应用到时间线。");
+  } finally {$("director-run").disabled = !gatewayConfig.active;}
+},message => directorStatus(message,true));
+$("director-apply").onclick = handle(() => {
+  if (currentBusy() || working) throw Error("这个项目正在执行任务，等任务结束后再应用。");
+  const picked = pickedShots(), form = $("director-form").elements, manifest = project.manifest;
+  if (!picked.length) return;
+  const replace = form.mode.value === "replace";
+  if (replace && !window.confirm("用方案替换当前全部 " + manifest.shots.length + " 个镜头？已生成的素材文件会保留。")) return;
+  const keys = {};
+  for (const [key,text] of Object.entries(directorPlan.locations)) {
+    let name = key;
+    while (manifest.locations[name] && manifest.locations[name] !== text) name += "-2";
+    manifest.locations[name] = text;keys[key] = name;
+  }
+  if (form.namedItem("style").checked && directorPlan.style) manifest.style = directorPlan.style;
+  let next = replace ? 1 : Math.max(0,...manifest.shots.map(row => Number(row.id.replace(/^s/,"")) || 0)) + 1;
+  const rows = picked.map(row => ({id:"s" + String(next++).padStart(2,"0"),title:row.title,seconds:row.seconds,
+    location:keys[row.location],cast:[...row.cast],action:row.action,dialogue:row.dialogue.map(line => ({...line})),
+    seed:crypto.getRandomValues(new Uint32Array(1))[0],...(row.sound ? {sound:row.sound} : {})}));
+  if (replace) manifest.shots = rows; else manifest.shots.push(...rows);
+  if (!dirty && directorPlan.title && replace) manifest.title = directorPlan.title;
+  currentShot = rows[0].id;exportPreview = null;editorTab = "shot";
+  $("director-dialog").close();
+  markDirty();renderProject();
+  notice("已" + (replace ? "替换为 " : "追加 ") + rows.length + " 个镜头。检查后点「保存修改」，再逐镜抢卡生成。");
+});
+$("notice").onclick = () => {$("notice").hidden = true;};
+const themes = [["auto","跟随系统"],["dark","深色"],["light","浅色"]];
+function applyTheme(value) {
+  if (value === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = value;
+  $("theme-label").textContent = "外观：" + themes.find(([id]) => id === value)[1];
+}
+let theme = "auto";
+try {theme = localStorage.getItem("theme") || "auto";} catch (_) {}
+if (!themes.some(([id]) => id === theme)) theme = "auto";
+applyTheme(theme);
+$("theme").onclick = () => {
+  theme = themes[(themes.findIndex(([id]) => id === theme) + 1) % themes.length][0];
+  try {localStorage.setItem("theme",theme);} catch (_) {}
+  applyTheme(theme);
+};
 $("new").onclick = () => $("new-dialog").showModal();
 $("setup").onclick = () => $("setup-dialog").showModal();
 $("refresh").onclick = refreshUsage;
@@ -835,11 +1494,18 @@ $("new-form").onsubmit = handle(async event => {
 window.addEventListener("beforeunload", event => {if (dirty) event.preventDefault();});
 window.addEventListener("focus", () => {void syncJobs().catch(() => {});});
 async function boot() {
+  renderGpuSummary();
+  void request("/api/gpus").then(data => {
+    gpuOptions = data.gpus;
+    gpuPlan.gpus = gpuPlan.gpus.filter(id => gpuOptions.some(row => row.id === id));
+    if (!gpuPlan.gpus.length) gpuPlan = {...data.default};
+    renderGpuSummary();
+  }).catch(() => {});
   projects = await request("/api/projects");
   const previous = projects.find(row => row.id === localStorage.getItem("currentProject"));
   if (previous || projects.length) await loadProject((previous || projects[0]).id);
   else renderProject();
-  void request("/api/gateway").then(config => {gatewayConfig = config;}).catch(() => {});
+  void request("/api/gateway").then(config => {gatewayConfig = config;if (project) presentEditor(true);renderAssistant();}).catch(() => {});
   void refreshUsage();
   const poll = async () => {
     try {await syncJobs();} catch (_) {}
