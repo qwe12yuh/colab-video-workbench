@@ -35,7 +35,8 @@ jobs:
             git switch --detach 9f852411cb77bbb14224e37e8ee3c84bf1f4a399
             python3 --version
           '@
-          (($script -replace "`r", '') + "`n# end") | wsl.exe -d Ubuntu-24.04 -u root -- bash -es
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($script -replace "`r", '') + "`n"))
+          wsl.exe -d Ubuntu-24.04 -u root -- bash -o pipefail -c "echo $encoded | base64 -d | bash -e"
           if ($LASTEXITCODE) { throw 'Ubuntu setup failed' }
 
       - name: Run repository tests in WSL2
@@ -53,7 +54,8 @@ jobs:
               /tmp/compat-venv/bin/python tests/workbench_mcp.py || status=1
             exit "$status"
           '@
-          (($script -replace "`r", '') + "`n# end") | wsl.exe -d Ubuntu-24.04 -u root --cd /root/colab-video-workbench -- bash -s
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($script -replace "`r", '') + "`n"))
+          wsl.exe -d Ubuntu-24.04 -u root --cd /root/colab-video-workbench -- bash -o pipefail -c "echo $encoded | base64 -d | bash"
           if ($LASTEXITCODE) { throw 'WSL2 tests failed' }
 
       - name: Install desktop app from the documented WSL UNC path
@@ -66,6 +68,9 @@ jobs:
           $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
           $env:PATH = "$scripts;$env:PATH"
           $setup = '\\wsl.localhost\Ubuntu-24.04\root\colab-video-workbench\workbench\install-windows.ps1'
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          Write-Output "Runner desktop directory exists before setup: $(Test-Path -LiteralPath $desktop -PathType Container)"
+          New-Item -ItemType Directory -Force -Path $desktop | Out-Null
           pwsh -NoProfile -ExecutionPolicy Bypass -File $setup
           if ($LASTEXITCODE) { throw 'Windows desktop installer failed' }
           $desktopApp = Join-Path $env:LOCALAPPDATA 'ColabVideoWorkbench'
@@ -78,7 +83,7 @@ jobs:
           if ($createdShortcut.TargetPath -ne (Join-Path $desktopApp 'venv\Scripts\pythonw.exe')) { throw 'Wrong desktop shortcut target' }
 
       - name: Open the desktop window with real WebView2
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         shell: pwsh
         run: |
           $webView = Join-Path $env:RUNNER_TEMP 'webview2-setup.exe'
