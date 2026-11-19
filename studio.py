@@ -415,9 +415,13 @@ def export_cut(project):
         if project.music:
             music, gain = project.music
             args += ["-stream_loop", -1, "-i", music]
+            options = subprocess.check_output(["ffmpeg", "-hide_banner", "-h", "filter=alimiter"], text=True)
+            # Older limiters need manual compensation for 5 ms lookahead at 48 kHz.
+            limiter = "alimiter=limit=0.95:latency=1" if re.search(r"^\s+latency\s", options, re.M) else (
+                "apad=pad_len=240,alimiter=limit=0.95:attack=5,atrim=start_sample=240,asetpts=PTS-STARTPTS")
             maps = ["-filter_complex",
                     f"[2:a]volume={gain},aresample=48000,aformat=channel_layouts=stereo[bed];"
-                    "[1:a][bed]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:latency=1[mix]",
+                    f"[1:a][bed]amix=inputs=2:duration=first:normalize=0,{limiter}[mix]",
                     "-map", "0:v:0", "-map", "[mix]"]
             next_input += 1
         if cues:

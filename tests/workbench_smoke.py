@@ -14,6 +14,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from studio import Project, save_json
 
 
 def exercise_gateway(request):
@@ -140,6 +142,21 @@ def smoke(temp):
         revised = request("/api/project/demo", {"revision":demo["revision"],"manifest":edited})
         assert revised["videos"][0]["state"] == "approved" and not revised["exports"][0]["current"]
 
+        shot = Project(temp / "projects/demo/project.json").jobs["s01"]
+        assert revised["videos"][0]["asr"] is None
+        report = {"key":shot.key,"trim_start":0,"expected":"","heard":"","similarity":1.0}
+        save_json(shot.folder / "asr.json", report)
+        assert request("/api/project/demo")["videos"][0]["asr"] == report
+        edited["shots"][0]["dialogue"] = [{"speaker":"subject","text":"新的对白","start":0.5,"end":1.5}]
+        revised = request("/api/project/demo", {"revision":revised["revision"],"manifest":edited})
+        assert revised["videos"][0]["key"] == shot.key[:8] and revised["videos"][0]["asr"] is None
+        report.update(expected="新的对白", heard="新的对白")
+        save_json(shot.folder / "asr.json", report)
+        assert request("/api/project/demo")["videos"][0]["asr"] == report
+        edited["shots"][0]["dialogue"] = []
+        revised = request("/api/project/demo", {"revision":revised["revision"],"manifest":edited})
+        assert revised["videos"][0]["asr"] is None
+
         asset = ROOT / "examples/gpu-smoke/assets/reference.png"
         prompt = "参考图人物望向窗外，轻轻微笑，镜头缓慢前推。"
         params = {"prompt":prompt,"extension":".png","base64":base64.b64encode(asset.read_bytes()).decode()}
@@ -149,8 +166,6 @@ def smoke(temp):
         assert quick["manifest"]["shots"][0]["input_mode"] == "reference_prompt"
         assert quick["manifest"]["shots"][0]["seconds"] == 6 and quick["videos"][0]["state"] == "pending"
         spec = temp / "projects" / quick["id"] / "project.json"
-        sys.path.insert(0, str(ROOT))
-        from studio import Project
         video = Project(spec).jobs["s01"]
         assert prompt in video.prompt and video.refs[0][1].read_bytes() == asset.read_bytes()
         before = len(request("/api/projects"))
@@ -192,7 +207,7 @@ def smoke(temp):
         row.update(pid=child.pid)
         record.write_text(json.dumps(row))
         assert request("/api/jobs")[0]["status"] == "interrupted"
-        print("Workbench PASS: quick reference images, gateway, export, CSRF, media, job recovery and MCP config.")
+        print("Workbench PASS: quick reference images, gateway, export, ASR invalidation, CSRF, media, job recovery and MCP config.")
     finally:
         if proc and proc.poll() is None:
             proc.terminate()
