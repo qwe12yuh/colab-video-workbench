@@ -285,7 +285,7 @@ class Handler(BaseHTTPRequestHandler):
                 name, mimetype = WEB[path]
                 return self.send_data(200, (HERE / "ui" / name).read_bytes(), mimetype)
             if path == "/api/health":
-                return self.json(200, {"app": APP, "version": "1.1"})
+                return self.json(200, {"app": APP, "version": "1.2"})
             if path == "/api/agent-config":
                 uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
                 args = ["-d", os.environ.get("WSL_DISTRO_NAME", "Ubuntu-24.04"), "--",
