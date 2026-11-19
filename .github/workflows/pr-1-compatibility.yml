@@ -114,11 +114,7 @@ jobs:
           if ($config.distro -ne 'Ubuntu-24.04' -or $config.linux_root -ne '/root/colab-video-workbench') { throw 'Wrong WSL config' }
           $shortcut = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Colab 影像工作台.lnk'
           if (!(Test-Path -LiteralPath $shortcut)) { throw 'Desktop shortcut is missing' }
-          $WScript = New-Object -ComObject WScript.Shell
-          $createdShortcut = $WScript.CreateShortcut($shortcut)
-          if ($createdShortcut.TargetPath -ne (Join-Path $desktopApp 'venv\Scripts\pythonw.exe')) { throw 'Wrong desktop shortcut target' }
-          if ($createdShortcut.Arguments -ne ('"' + (Join-Path $desktopApp 'desktop.py') + '"')) { throw 'Wrong desktop shortcut arguments' }
-          Write-Output 'Chinese desktop shortcut saved with the expected target and arguments'
+          Write-Output 'Chinese desktop shortcut saved'
 
       - name: Open the desktop window with real WebView2
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -133,3 +129,16 @@ jobs:
           $desktopApp = Join-Path $env:LOCALAPPDATA 'ColabVideoWorkbench'
           & (Join-Path $desktopApp 'venv\Scripts\python.exe') (Join-Path $desktopApp 'desktop.py') --smoke-window
           if ($LASTEXITCODE) { throw 'WebView2 desktop smoke test failed' }
+
+      - name: Launch the app from the Chinese desktop shortcut
+        shell: pwsh
+        run: |
+          $shortcut = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Colab 影像工作台.lnk'
+          Start-Process -FilePath $shortcut
+          for ($i = 0; $i -lt 45; $i++) {
+            $window = Get-Process -Name pythonw -ErrorAction SilentlyContinue | Where-Object MainWindowTitle -eq 'Colab 影像工作台'
+            if ($window) { break }
+            Start-Sleep -Seconds 1
+          }
+          if (!$window) { throw 'The shortcut did not open the desktop window' }
+          Write-Output 'The Chinese shortcut opened the desktop window'
