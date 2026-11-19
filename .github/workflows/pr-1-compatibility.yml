@@ -1,4 +1,4 @@
-name: PR 1 Windows compatibility
+name: Windows desktop compatibility
 on:
   push:
     branches: [codex/pr-1-compatibility-test]
@@ -23,7 +23,7 @@ jobs:
           wsl.exe -d Ubuntu-24.04 -u root -- uname -a
           if ($LASTEXITCODE) { throw 'WSL2 boot failed' }
 
-      - name: Prepare dependencies and check out v1.2.0
+      - name: Prepare dependencies and check out the PR commit
         id: setup
         shell: pwsh
         run: |
@@ -32,7 +32,7 @@ jobs:
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git python3 python3-venv ffmpeg >/tmp/compat-apt.log || { cat /tmp/compat-apt.log; exit 1; }
             git clone -q https://github.com/qwe12yuh/colab-video-workbench.git /root/colab-video-workbench
             cd /root/colab-video-workbench
-            git switch --detach 9f852411cb77bbb14224e37e8ee3c84bf1f4a399
+            git switch --detach 40c2f30233545eff36f3ed6498047d21d068f1ac
             python3 --version
           '@
           $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($script -replace "`r", '') + "`n"))
@@ -68,55 +68,24 @@ jobs:
           $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
           $env:PATH = "$scripts;$env:PATH"
           $setup = '\\wsl.localhost\Ubuntu-24.04\root\colab-video-workbench\workbench\install-windows.ps1'
-          $desktop = [Environment]::GetFolderPath('Desktop')
-          Write-Output "Runner desktop directory exists before setup: $(Test-Path -LiteralPath $desktop -PathType Container)"
-          New-Item -ItemType Directory -Force -Path $desktop | Out-Null
           pwsh -NoProfile -ExecutionPolicy Bypass -File $setup
           if ($LASTEXITCODE) { throw 'Windows desktop installer failed' }
           $desktopApp = Join-Path $env:LOCALAPPDATA 'ColabVideoWorkbench'
           $config = Get-Content -Raw (Join-Path $desktopApp 'desktop-config.json') | ConvertFrom-Json
           if ($config.distro -ne 'Ubuntu-24.04' -or $config.linux_root -ne '/root/colab-video-workbench') { throw 'Wrong WSL config' }
-          $shortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Colab 影像工作台.lnk'
+          $shortcut = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Colab 影像工作台.lnk'
           if (!(Test-Path -LiteralPath $shortcut)) { throw 'Desktop shortcut is missing' }
           $WScript = New-Object -ComObject WScript.Shell
           $createdShortcut = $WScript.CreateShortcut($shortcut)
           if ($createdShortcut.TargetPath -ne (Join-Path $desktopApp 'venv\Scripts\pythonw.exe')) { throw 'Wrong desktop shortcut target' }
-
-      - name: Compare ASCII and Chinese shortcut names on Windows
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          $desktop = [Environment]::GetFolderPath('Desktop')
-          $desktopApp = Join-Path $env:LOCALAPPDATA 'ColabVideoWorkbench'
-          $pythonw = Join-Path $desktopApp 'venv\Scripts\pythonw.exe'
-          $config = Get-Content -Raw (Join-Path $desktopApp 'desktop-config.json') | ConvertFrom-Json
-          if ($config.distro -ne 'Ubuntu-24.04' -or $config.linux_root -ne '/root/colab-video-workbench') { throw 'Wrong WSL config' }
-          $shell = New-Object -ComObject WScript.Shell
-          $ascii = Join-Path $desktop 'Colab Shortcut Probe.lnk'
-          $chinese = Join-Path $desktop 'Colab 测试快捷方式.lnk'
-          $link = $shell.CreateShortcut($ascii)
-          $link.TargetPath = $pythonw
-          $link.Save()
-          if (!(Test-Path -LiteralPath $ascii)) { throw 'ASCII shortcut not saved' }
-          Write-Output 'ASCII shortcut saved'
-          $link = $shell.CreateShortcut($chinese)
-          $link.TargetPath = $pythonw
-          try {
-              $link.Save()
-              if (!(Test-Path -LiteralPath $chinese)) { throw 'Chinese filename missing' }
-              Write-Output 'Chinese shortcut saved directly'
-          } catch {
-              Write-Output "Direct Chinese shortcut save failed: $_"
-              Move-Item -LiteralPath $ascii -Destination $chinese
-              if (!(Test-Path -LiteralPath $chinese)) { throw 'Unicode rename failed' }
-              Write-Output 'ASCII shortcut renamed to Chinese filename successfully'
-          }
+          if ($createdShortcut.Arguments -ne ('"' + (Join-Path $desktopApp 'desktop.py') + '"')) { throw 'Wrong desktop shortcut arguments' }
+          Write-Output 'Chinese desktop shortcut saved with the expected target and arguments'
 
       - name: Open the desktop window with real WebView2
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         shell: pwsh
         run: |
-          $env:PYTHONIOENCODING = 'utf-8'
+          $env:PYTHONIOENCODING = 'cp1252'
           [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
           $webView = Join-Path $env:RUNNER_TEMP 'webview2-setup.exe'
           curl.exe -fL --retry 3 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -o $webView
